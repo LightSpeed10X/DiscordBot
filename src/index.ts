@@ -5,8 +5,8 @@ import {
   Events,
   GatewayIntentBits,
   GuildMember,
-  MessageFlags,
   PermissionFlagsBits,
+  WebhookClient,
   type ChatInputCommandInteraction,
   type NewsChannel,
   type TextChannel,
@@ -23,6 +23,9 @@ import {
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
+const logWebhook = config.logWebhookUrl
+  ? new WebhookClient({ url: config.logWebhookUrl })
+  : undefined;
 
 const pollEmojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"];
 const eightBallAnswers = [
@@ -39,6 +42,36 @@ const eightBallAnswers = [
 ];
 const errorReply = "That command could not be completed. Check the bot's permissions and try again.";
 
+function logCommand(
+  interaction: ChatInputCommandInteraction,
+  outcome: "completed" | "error"
+): void {
+  if (!logWebhook) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(outcome === "error" ? 0xed4245 : 0x57f287)
+    .setTitle(`/${interaction.commandName}`)
+    .addFields(
+      { name: "User", value: `${interaction.user.tag} (${interaction.user.id})` },
+      {
+        name: "Server",
+        value: interaction.guild
+          ? `${interaction.guild.name} (${interaction.guild.id})`
+          : "Direct message"
+      },
+      { name: "Channel ID", value: interaction.channelId ?? "Unknown" },
+      { name: "Handler result", value: outcome }
+    )
+    .setTimestamp(interaction.createdAt);
+
+  void logWebhook.send({
+    embeds: [embed],
+    allowedMentions: { parse: [] }
+  }).catch(error => {
+    console.error(`Command log webhook failed (${error instanceof Error ? error.name : "unknown error"}).`);
+  });
+}
+
 function getGuildTextChannel(interaction: ChatInputCommandInteraction): TextChannel | NewsChannel | null {
   const channel = interaction.channel;
   if (
@@ -50,13 +83,12 @@ function getGuildTextChannel(interaction: ChatInputCommandInteraction): TextChan
   return null;
 }
 
-async function replyPrivately(
+async function replyPublicly(
   interaction: ChatInputCommandInteraction,
   content: string
 ): Promise<void> {
   await interaction.reply({
     content,
-    flags: MessageFlags.Ephemeral,
     allowedMentions: { parse: [] }
   });
 }
@@ -114,22 +146,20 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
           "**Moderation:** `/clear`, `/slowmode`, `/timeout`, `/kick`, `/ban`",
           "**Server customization:** `/settings view`, `/settings color`, `/settings welcome`, `/settings disable-welcome`",
           "**Other:** `/announce`"
-        ].join("\n"),
-        flags: MessageFlags.Ephemeral
+        ].join("\n")
       });
       return;
     }
     case "ping": {
       const roundTrip = Date.now() - interaction.createdTimestamp;
       await interaction.reply({
-        content: `Round-trip: ${roundTrip}ms | Gateway: ${Math.round(client.ws.ping)}ms`,
-        flags: MessageFlags.Ephemeral
+        content: `Round-trip: ${roundTrip}ms | Gateway: ${Math.round(client.ws.ping)}ms`
       });
       return;
     }
     case "server": {
       if (!interaction.guild) {
-        await replyPrivately(interaction, "This command is only available in a server.");
+        await replyPublicly(interaction, "This command is only available in a server.");
         return;
       }
       const guild = interaction.guild;
@@ -143,7 +173,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         );
       const icon = guild.iconURL({ size: 256 });
       if (icon) embed.setThumbnail(icon);
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      await interaction.reply({ embeds: [embed] });
       return;
     }
     case "user": {
@@ -157,7 +187,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
           { name: "Bot account", value: user.bot ? "Yes" : "No", inline: true },
           { name: "User ID", value: user.id, inline: true }
         );
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      await interaction.reply({ embeds: [embed] });
       return;
     }
     case "avatar": {
@@ -168,7 +198,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         .setTitle(`${user.username}'s avatar`)
         .setImage(avatar)
         .setURL(avatar);
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      await interaction.reply({ embeds: [embed] });
       return;
     }
     case "coinflip": {
@@ -179,7 +209,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
       const minimum = interaction.options.getInteger("minimum") ?? 1;
       const maximum = interaction.options.getInteger("maximum") ?? 6;
       if (minimum > maximum) {
-        await replyPrivately(interaction, "The minimum must be less than or equal to the maximum.");
+        await replyPublicly(interaction, "The minimum must be less than or equal to the maximum.");
         return;
       }
       await interaction.reply(`🎲 You rolled **${randomInt(minimum, maximum + 1)}** (${minimum}–${maximum}).`);
@@ -204,7 +234,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
     case "poll": {
       const channel = getGuildTextChannel(interaction);
       if (!channel) {
-        await replyPrivately(interaction, "Create polls in a server text channel.");
+        await replyPublicly(interaction, "Create polls in a server text channel.");
         return;
       }
       const choices = [1, 2, 3, 4, 5]
@@ -232,11 +262,11 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
     }
     case "settings": {
       if (!interaction.guild) {
-        await replyPrivately(interaction, "Server settings are only available in a server.");
+        await replyPublicly(interaction, "Server settings are only available in a server.");
         return;
       }
       if (!isAllowed(interaction, PermissionFlagsBits.ManageGuild)) {
-        await replyPrivately(interaction, "You need Manage Server to customize this bot.");
+        await replyPublicly(interaction, "You need Manage Server to customize this bot.");
         return;
       }
 
@@ -246,7 +276,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         const welcomeSummary = settings.welcomeChannelId
           ? `Enabled in <#${settings.welcomeChannelId}>\nMessage: ${settings.welcomeMessage}`
           : "Disabled";
-        await replyPrivately(
+        await replyPublicly(
           interaction,
           `**Server bot settings**\nEmbed color: \`#${settings.embedColor.toString(16).padStart(6, "0").toUpperCase()}\`\nWelcome messages: ${welcomeSummary}`
         );
@@ -255,24 +285,25 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
       if (subcommand === "color") {
         const color = interaction.options.getString("hex", true);
         if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
-          await replyPrivately(interaction, "Enter a hex color in the format `#5865F2`.");
+          await replyPublicly(interaction, "Enter a hex color in the format `#5865F2`.");
           return;
         }
         await updateGuildSettings(interaction.guild.id, {
           embedColor: Number.parseInt(color.slice(1), 16)
         });
-        await replyPrivately(interaction, `Embed color updated to \`${color.toUpperCase()}\`.`);
+        await replyPublicly(interaction, `Embed color updated to \`${color.toUpperCase()}\`.`);
         return;
       }
       if (subcommand === "welcome") {
-        const channel = interaction.options.getChannel("channel", true);
+        const selectedChannel = interaction.options.getChannel("channel", true, [ChannelType.GuildText]);
         const message = interaction.options.getString("message", true).trim();
         if (!message) {
-          await replyPrivately(interaction, "Welcome message cannot be empty.");
+          await replyPublicly(interaction, "Welcome message cannot be empty.");
           return;
         }
-        if (channel.type !== ChannelType.GuildText) {
-          await replyPrivately(interaction, "Choose a regular server text channel.");
+        const channel = await interaction.guild.channels.fetch(selectedChannel.id);
+        if (!channel || channel.type !== ChannelType.GuildText) {
+          await replyPublicly(interaction, "Choose a regular server text channel.");
           return;
         }
         const botMember = await interaction.guild.members.fetchMe();
@@ -282,14 +313,14 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
             PermissionFlagsBits.SendMessages
           ])
         ) {
-          await replyPrivately(interaction, "I need View Channel and Send Messages in the selected channel.");
+          await replyPublicly(interaction, "I need View Channel and Send Messages in the selected channel.");
           return;
         }
         await updateGuildSettings(interaction.guild.id, {
           welcomeChannelId: channel.id,
           welcomeMessage: message
         });
-        await replyPrivately(
+        await replyPublicly(
           interaction,
           `Welcome messages enabled in <#${channel.id}>. Available placeholders: \`{user}\`, \`{server}\`, and \`{count}\`.`
         );
@@ -299,16 +330,16 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         welcomeChannelId: undefined,
         welcomeMessage: undefined
       });
-      await replyPrivately(interaction, "Welcome messages disabled.");
+      await replyPublicly(interaction, "Welcome messages disabled.");
       return;
     }
     case "announce": {
       if (!isAllowed(interaction, PermissionFlagsBits.ManageMessages)) {
-        await replyPrivately(interaction, "You need Manage Messages to make an announcement.");
+        await replyPublicly(interaction, "You need Manage Messages to make an announcement.");
         return;
       }
       if (!getGuildTextChannel(interaction)) {
-        await replyPrivately(interaction, "Make announcements in a server text channel.");
+        await replyPublicly(interaction, "Make announcements in a server text channel.");
         return;
       }
       await interaction.reply({
@@ -319,89 +350,89 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
     }
     case "clear": {
       if (!isAllowed(interaction, PermissionFlagsBits.ManageMessages)) {
-        await replyPrivately(interaction, "You need Manage Messages to clear messages.");
+        await replyPublicly(interaction, "You need Manage Messages to clear messages.");
         return;
       }
       const channel = getGuildTextChannel(interaction);
       if (!channel) {
-        await replyPrivately(interaction, "This command requires a server text channel.");
+        await replyPublicly(interaction, "This command requires a server text channel.");
         return;
       }
       const amount = interaction.options.getInteger("amount", true);
       const deleted = await channel.bulkDelete(amount, true);
-      await replyPrivately(interaction, `Deleted ${deleted.size} recent message(s). Messages older than 14 days are skipped by Discord.`);
+      await replyPublicly(interaction, `Deleted ${deleted.size} recent message(s). Messages older than 14 days are skipped by Discord.`);
       return;
     }
     case "slowmode": {
       if (!isAllowed(interaction, PermissionFlagsBits.ManageChannels)) {
-        await replyPrivately(interaction, "You need Manage Channels to change slowmode.");
+        await replyPublicly(interaction, "You need Manage Channels to change slowmode.");
         return;
       }
       const channel = getGuildTextChannel(interaction);
       if (!channel) {
-        await replyPrivately(interaction, "This command requires a server text channel.");
+        await replyPublicly(interaction, "This command requires a server text channel.");
         return;
       }
       const seconds = interaction.options.getInteger("seconds", true);
       await channel.setRateLimitPerUser(seconds, `Changed by ${interaction.user.tag}`);
-      await replyPrivately(interaction, seconds === 0 ? "Slowmode disabled." : `Slowmode set to ${seconds} second(s).`);
+      await replyPublicly(interaction, seconds === 0 ? "Slowmode disabled." : `Slowmode set to ${seconds} second(s).`);
       return;
     }
     case "timeout": {
       if (!isAllowed(interaction, PermissionFlagsBits.ModerateMembers)) {
-        await replyPrivately(interaction, "You need Moderate Members to use timeouts.");
+        await replyPublicly(interaction, "You need Moderate Members to use timeouts.");
         return;
       }
       const targetUser = interaction.options.getUser("target", true);
       const { actor, bot, target } = await getModerationMembers(interaction, targetUser);
       const denial = validateModeratorTarget(actor, target, bot, "moderatable");
       if (denial) {
-        await replyPrivately(interaction, denial);
+        await replyPublicly(interaction, denial);
         return;
       }
       const minutes = interaction.options.getInteger("minutes", true);
       const reason = interaction.options.getString("reason") ?? "No reason provided";
       await target.timeout(minutes * 60_000, reason);
-      await replyPrivately(interaction, `Timed out **${target.user.tag}** for ${minutes} minute(s).`);
+      await replyPublicly(interaction, `Timed out **${target.user.tag}** for ${minutes} minute(s).`);
       return;
     }
     case "kick": {
       if (!isAllowed(interaction, PermissionFlagsBits.KickMembers)) {
-        await replyPrivately(interaction, "You need Kick Members to use this command.");
+        await replyPublicly(interaction, "You need Kick Members to use this command.");
         return;
       }
       const targetUser = interaction.options.getUser("target", true);
       const { actor, bot, target } = await getModerationMembers(interaction, targetUser);
       const denial = validateModeratorTarget(actor, target, bot, "kickable");
       if (denial) {
-        await replyPrivately(interaction, denial);
+        await replyPublicly(interaction, denial);
         return;
       }
       const reason = interaction.options.getString("reason") ?? "No reason provided";
       await target.kick(reason);
-      await replyPrivately(interaction, `Kicked **${target.user.tag}**.`);
+      await replyPublicly(interaction, `Kicked **${target.user.tag}**.`);
       return;
     }
     case "ban": {
       if (!isAllowed(interaction, PermissionFlagsBits.BanMembers)) {
-        await replyPrivately(interaction, "You need Ban Members to use this command.");
+        await replyPublicly(interaction, "You need Ban Members to use this command.");
         return;
       }
       const targetUser = interaction.options.getUser("target", true);
       const { actor, bot, target } = await getModerationMembers(interaction, targetUser);
       const denial = validateModeratorTarget(actor, target, bot, "bannable");
       if (denial) {
-        await replyPrivately(interaction, denial);
+        await replyPublicly(interaction, denial);
         return;
       }
       const deleteDays = interaction.options.getInteger("delete-days") ?? 0;
       const reason = interaction.options.getString("reason") ?? "No reason provided";
       await target.ban({ deleteMessageSeconds: deleteDays * 86_400, reason });
-      await replyPrivately(interaction, `Banned **${target.user.tag}**.`);
+      await replyPublicly(interaction, `Banned **${target.user.tag}**.`);
       return;
     }
     default:
-      await replyPrivately(interaction, "Unknown command.");
+      await replyPublicly(interaction, "Unknown command.");
   }
 }
 
@@ -443,7 +474,9 @@ client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
   try {
     await executeCommand(interaction);
+    logCommand(interaction, "completed");
   } catch (error) {
+    logCommand(interaction, "error");
     console.error(
       `Command /${interaction.commandName} failed (${error instanceof Error ? error.name : "unknown error"}).`
     );
@@ -451,7 +484,7 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: errorReply, embeds: [] });
       } else {
-        await replyPrivately(interaction, errorReply);
+        await replyPublicly(interaction, errorReply);
       }
     } catch (replyError) {
       console.error(
@@ -471,5 +504,4 @@ try {
 } catch (error) {
   console.error(`Bot startup failed (${error instanceof Error ? error.message : "unknown error"}).`);
   process.exitCode = 1;
-}
 }

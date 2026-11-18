@@ -17,7 +17,9 @@ role-hierarchy-checked.
 1. Copy `.env.example` to `.env` and set `DISCORD_TOKEN` and `DISCORD_CLIENT_ID`.
    Set `DISCORD_GUILD_ID` to register commands instantly in one server during
    development. Leave it empty to register global commands. Optionally set
-   `BOT_DATA_DIR` to choose where server customizations are stored.
+   `BOT_DATA_DIR` to choose where server customizations are stored. Set
+   `BOT_LOG_WEBHOOK_URL` to a Discord webhook URL to receive slash-command logs;
+   leave it empty to disable webhook logging.
 2. In the Developer Portal, enable **Server Members Intent** under *Bot →
    Privileged Gateway Intents*. Invite the bot with the `bot` and
    `applications.commands` scopes. Grant only the permissions required for the
@@ -33,6 +35,8 @@ role-hierarchy-checked.
 
 Never commit `.env`, share the bot token, or put credentials in source code.
 If a token is exposed, reset it immediately in the Developer Portal.
+To enable command logs, create a webhook in a dedicated Discord channel and add
+its URL as `BOT_LOG_WEBHOOK_URL` in `.env`. Treat this URL as a secret too.
 
 ## Commands
 
@@ -70,9 +74,14 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
   this bot does not read arbitrary message content.
 - Enable the **Server Members Intent** in the Developer Portal. It is used only
   for fetching members and checking role hierarchy before moderation actions.
-- Replies to moderation actions are private where practical. Polls and
-  announcements, random choices, and welcome messages disable mention parsing
-  to prevent accidental mass mentions.
+- All slash-command replies, including settings and moderation results, are
+  visible to everyone in the channel. Polls and announcements, random choices,
+  and welcome messages disable mention parsing to prevent accidental mass
+  mentions.
+- When `BOT_LOG_WEBHOOK_URL` is configured, command logs include the command,
+  timestamp, user name and ID, server/channel IDs, and whether the handler
+  completed or errored. Option values are not logged. Treat the webhook URL as
+  a secret and do not share or commit it.
 - Discord permission and role checks are applied both to command definitions
   and at runtime for privileged operations.
 - Per-server settings are stored as JSON under `BOT_DATA_DIR` (default: `data/`).
