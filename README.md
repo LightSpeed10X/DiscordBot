@@ -20,11 +20,16 @@ role-hierarchy-checked.
    `BOT_DATA_DIR` to choose where server customizations are stored. Set
    `BOT_LOG_WEBHOOK_URL` to a Discord webhook URL to receive slash-command logs;
    leave it empty to disable webhook logging.
-2. In the Developer Portal, enable **Server Members Intent** under *Bot →
+2. To enable the local web dashboard, set `DISCORD_CLIENT_SECRET` and a
+   `DASHBOARD_SESSION_SECRET` of at least 32 characters. Add
+   `http://localhost:3000/auth/callback` to the application's OAuth2 redirect
+   URLs in the Developer Portal. The dashboard is disabled if these secrets are
+   unset. `DASHBOARD_BASE_URL` and `DASHBOARD_PORT` are optional.
+3. In the Developer Portal, enable **Server Members Intent** under *Bot →
    Privileged Gateway Intents*. Invite the bot with the `bot` and
    `applications.commands` scopes. Grant only the permissions required for the
    features you intend to use (listed below).
-3. Install dependencies and build:
+4. Install dependencies and build:
 
    ```sh
    npm install
@@ -82,15 +87,29 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
   timestamp, user name and ID, server/channel IDs, and whether the handler
   completed or errored. Option values are not logged. Treat the webhook URL as
   a secret and do not share or commit it.
+- The optional local dashboard is served only on `127.0.0.1`, uses Discord OAuth,
+  and only lists servers where the signed-in user has Manage Server and the bot
+  is installed. It keeps recent command metadata locally under `BOT_DATA_DIR`.
+  Do not expose this development dashboard to the public internet; production
+  deployment needs HTTPS and a persistent session store.
 - Discord permission and role checks are applied both to command definitions
   and at runtime for privileged operations.
 - Per-server settings are stored as JSON under `BOT_DATA_DIR` (default: `data/`).
   Back up this directory if you want to preserve customizations. Malformed
   settings fail startup rather than silently discarding configuration.
-- The bot does not collect message content or track user activity.
+- The bot does not read arbitrary message content. When command logging is
+  enabled, it records command metadata but never command option values.
 
 Welcome templates support `{user}`, `{server}`, and `{count}`. Only members
 with Manage Server can change welcome settings or the server's embed color.
+
+## Local dashboard
+
+After OAuth is configured and the bot is running, open
+`http://localhost:3000`. Sign in with Discord to see servers where you have
+Manage Server and the bot is installed. The dashboard includes an overview,
+server setup, a command browser, and recent command activity. Tickets,
+XP/levels, and event scheduling are not part of this first dashboard phase.
 
 The bot must be online to handle commands. Re-run `npm run deploy:commands`
 after changing slash command definitions.

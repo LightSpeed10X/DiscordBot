@@ -13,7 +13,9 @@ import {
   type User
 } from "discord.js";
 import { randomInt } from "node:crypto";
+import { recordCommandLog } from "./audit-log.js";
 import { config } from "./config.js";
+import { startDashboard } from "./dashboard.js";
 import {
   getGuildSettings,
   loadGuildSettings,
@@ -46,6 +48,20 @@ function logCommand(
   interaction: ChatInputCommandInteraction,
   outcome: "completed" | "error"
 ): void {
+  if (interaction.guildId && interaction.guild) {
+    void recordCommandLog({
+      timestamp: interaction.createdAt.toISOString(),
+      commandName: interaction.commandName,
+      userName: interaction.user.tag,
+      userId: interaction.user.id,
+      guildName: interaction.guild.name,
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      outcome
+    }).catch(error => {
+      console.error(`Command audit log write failed (${error instanceof Error ? error.name : "unknown error"}).`);
+    });
+  }
   if (!logWebhook) return;
 
   const embed = new EmbedBuilder()
@@ -438,6 +454,13 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
 
 client.once(Events.ClientReady, readyClient => {
   console.log(`Ready as ${readyClient.user.tag}`);
+  if (config.dashboard) {
+    void startDashboard(readyClient, config.dashboard, config.clientId).catch(error => {
+      console.error(`Dashboard startup failed (${error instanceof Error ? error.message : "unknown error"}).`);
+    });
+  } else {
+    console.log("Dashboard disabled. Configure DISCORD_CLIENT_SECRET and DASHBOARD_SESSION_SECRET to enable it.");
+  }
 });
 
 client.on(Events.GuildMemberAdd, async member => {

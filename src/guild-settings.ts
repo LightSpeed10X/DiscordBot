@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+export const botDataDirectory = resolve(process.env.BOT_DATA_DIR?.trim() || "data");
+
 export interface GuildSettings {
   embedColor: number;
   welcomeChannelId?: string;
   welcomeMessage?: string;
 }
 
-const settingsPath = resolve(process.env.BOT_DATA_DIR?.trim() || "data", "guild-settings.json");
+const settingsPath = resolve(botDataDirectory, "guild-settings.json");
 const guildSettings = new Map<string, GuildSettings>();
 let saveQueue: Promise<void> = Promise.resolve();
 
