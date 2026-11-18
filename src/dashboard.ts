@@ -127,17 +127,35 @@ function hasManageGuild(guild: OAuthGuild): boolean {
 }
 
 async function discordApi<T>(path: string, accessToken: string): Promise<T> {
-  const response = await fetch(`https://discord.com/api/v10${path}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(10_000)
-  });
-  if (!response.ok) {
-    throw new HttpError(
-      response.status === 401 ? 401 : 502,
-      response.status === 401 ? "Discord sign-in expired. Please sign in again." : "Discord API request failed."
-    );
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch(`https://discord.com/api/v10${path}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (!response.ok) {
+        if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          continue;
+        }
+        throw new HttpError(
+          response.status === 401 ? 401 : 502,
+          response.status === 401
+            ? "Discord sign-in expired. Please sign in again."
+            : `Discord API request failed (HTTP ${response.status}).`
+        );
+      }
+      return await response.json() as T;
+    } catch (error) {
+      lastError = error;
+      if (error instanceof HttpError) throw error;
+      if (attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
   }
-  return await response.json() as T;
+  throw new HttpError(502, `Discord API request failed: ${lastError instanceof Error ? lastError.name : "network error"}.`);
 }
 
 async function fetchOAuthGuilds(accessToken: string): Promise<OAuthGuild[]> {
@@ -416,7 +434,9 @@ export async function startDashboard(
 
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const status = error instanceof HttpError ? error.status : 500;
-    console.error(`Dashboard request failed (${error instanceof Error ? error.name : "unknown error"}).`);
+    if (status >= 500) {
+      console.error(`Dashboard request failed (${error instanceof Error ? error.message : "unknown error"}).`);
+    }
     if (res.headersSent) return;
     res.status(status).json({
       error: error instanceof HttpError ? error.message : "Dashboard request failed."
