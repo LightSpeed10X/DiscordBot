@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { isDiscordWebhookUrl } from "./webhooks.js";
 
 export const botDataDirectory = resolve(process.env.BOT_DATA_DIR?.trim() || "data");
 
@@ -10,6 +11,7 @@ export interface GuildSettings {
   welcomeMessage?: string;
   autoModerationEnabled: boolean;
   levelingEnabled: boolean;
+  dashboardWebhookUrl?: string;
 }
 
 const settingsPath = resolve(botDataDirectory, "guild-settings.json");
@@ -69,6 +71,12 @@ function parseSettings(value: unknown): Map<string, GuildSettings> {
       }
       setting.levelingEnabled = record.levelingEnabled;
     }
+    if (record.dashboardWebhookUrl !== undefined) {
+      if (!isDiscordWebhookUrl(record.dashboardWebhookUrl)) {
+        throw new Error(`Guild settings for ${guildId} contain an invalid dashboard webhook URL.`);
+      }
+      setting.dashboardWebhookUrl = record.dashboardWebhookUrl;
+    }
     if ((setting.welcomeChannelId === undefined) !== (setting.welcomeMessage === undefined)) {
       throw new Error(`Guild settings for ${guildId} must define both welcome fields or neither.`);
     }
@@ -110,6 +118,9 @@ export async function updateGuildSettings(
     }
     if (typeof next.autoModerationEnabled !== "boolean" || typeof next.levelingEnabled !== "boolean") {
       throw new Error("Feature settings must be enabled or disabled.");
+    }
+    if (next.dashboardWebhookUrl !== undefined && !isDiscordWebhookUrl(next.dashboardWebhookUrl)) {
+      throw new Error("Dashboard webhook URL must be a valid Discord webhook URL.");
     }
     if (
       (next.welcomeChannelId === undefined) !== (next.welcomeMessage === undefined) ||

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { isDiscordWebhookUrl } from "./webhooks.js";
 
 export interface DashboardConfig {
   clientSecret: string;
@@ -78,23 +79,7 @@ function optionalDashboardConfig(): DashboardConfig | undefined {
 function optionalDiscordWebhookUrl(name: string): string | undefined {
   const value = process.env[name]?.trim();
   if (!value) return undefined;
-
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error(`${name} must be a valid Discord webhook URL`);
-  }
-  if (
-    url.protocol !== "https:" ||
-    !["discord.com", "discordapp.com"].includes(url.hostname) ||
-    url.port ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash ||
-    !/^\/api\/webhooks\/\d+\/[^/]+\/?$/.test(url.pathname)
-  ) {
+  if (!isDiscordWebhookUrl(value)) {
     throw new Error(`${name} must be a valid Discord webhook URL`);
   }
   return value;

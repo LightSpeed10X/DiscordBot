@@ -15,7 +15,7 @@ let toastTimer;
 const panelDetails = {
   overview: ["Overview", "Your server, at a glance."],
   setup: ["Quick setup", "Configure welcome messages, protection, and activity levels."],
-  tools: ["Server tools", "Manage channel slowmode and post announcements."],
+  tools: ["Server tools", "Tune channels, announce updates, and manage members."],
   commands: ["Command library", "Everything your community can ask the bot to do."],
   logs: ["Activity logs", "Recent slash-command activity for this server."]
 };
@@ -243,6 +243,12 @@ function renderSetup() {
             </div>
             <span class="field-hint">Messages are counted for XP but their content is not read or stored. One XP award per member per minute.</span>
           </div>
+          <div class="field">
+            <label for="dashboardWebhookUrl">Dashboard activity webhook</label>
+            <input id="dashboardWebhookUrl" name="dashboardWebhookUrl" type="url" maxlength="300" autocomplete="off" placeholder="https://discord.com/api/webhooks/…">
+            <span class="field-hint">${settings.dashboardWebhookConfigured ? "A webhook is saved. Leave blank to keep it. The URL is never displayed after saving." : "Send dashboard changes to a private Discord channel. The webhook URL is stored as a secret."}</span>
+            ${settings.dashboardWebhookConfigured ? `<label class="toggle-row webhook-remove"><input id="clearDashboardWebhook" type="checkbox"> Remove saved webhook</label>` : '<input id="clearDashboardWebhook" type="checkbox" hidden>'}
+          </div>
           <div class="form-actions"><button class="primary-button" type="submit">Save settings</button><span id="saveStatus" class="field-hint"></span></div>
         </form>
       </section>
@@ -312,6 +318,52 @@ function renderServerTools() {
         </form>
         <p class="tool-footnote">You need Manage Messages. The bot needs permission to view and send messages in the selected channel.</p>
       </section>
+      <section class="panel tool-card">
+        <div class="panel-heading">
+          <div><h2>Clear recent messages</h2><p>Bulk-delete up to 100 messages from a text channel.</p></div>
+          <span class="tool-badge">MANAGE MESSAGES</span>
+        </div>
+        <form id="clearMessagesForm" class="tool-form">
+          <div class="field">
+            <label for="clearChannel">Text channel</label>
+            <select id="clearChannel" name="channelId" required>${channelOptions}</select>
+          </div>
+          <div class="field">
+            <label for="clearAmount">Number of messages</label>
+            <input id="clearAmount" name="amount" type="number" min="1" max="100" value="10" required>
+          </div>
+          <div class="form-actions"><button class="danger-button" type="submit" ${channels.length ? "" : "disabled"}>Clear messages</button><span id="clearStatus" class="field-hint" role="status"></span></div>
+        </form>
+        <p class="tool-footnote">Discord skips messages older than 14 days. The bot also needs Manage Messages.</p>
+      </section>
+      <section class="panel tool-card">
+        <div class="panel-heading">
+          <div><h2>Timeout a member</h2><p>Temporarily restrict a member for up to 28 days.</p></div>
+          <span class="tool-badge">MODERATE MEMBERS</span>
+        </div>
+        <form id="timeoutForm" class="tool-form">
+          <div class="field">
+            <label for="timeoutUserId">Member user ID</label>
+            <input id="timeoutUserId" name="userId" inputmode="numeric" pattern="[0-9]{17,20}" maxlength="20" placeholder="Discord user ID" required>
+          </div>
+          <div class="field">
+            <label for="timeoutDuration">Duration</label>
+            <select id="timeoutDuration" name="durationMinutes">
+              <option value="10">10 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="1440">1 day</option>
+              <option value="10080">7 days</option>
+              <option value="40320">28 days</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="timeoutReason">Reason</label>
+            <textarea id="timeoutReason" name="reason" maxlength="500" placeholder="Optional moderator note"></textarea>
+          </div>
+          <div class="form-actions"><button class="danger-button" type="submit">Apply timeout</button><span id="timeoutStatus" class="field-hint" role="status"></span></div>
+        </form>
+        <p class="tool-footnote">Role hierarchy and Discord permissions are checked before the timeout is applied.</p>
+      </section>
     </div>`;
   const slowmodeChannel = document.getElementById("slowmodeChannel");
   const slowmodeSelect = document.getElementById("slowmodeSeconds");
@@ -321,6 +373,8 @@ function renderServerTools() {
   });
   document.getElementById("slowmodeForm").addEventListener("submit", setSlowmode);
   document.getElementById("announcementForm").addEventListener("submit", postAnnouncement);
+  document.getElementById("clearMessagesForm").addEventListener("submit", clearMessages);
+  document.getElementById("timeoutForm").addEventListener("submit", timeoutMember);
 }
 
 function renderCommands() {
@@ -385,10 +439,13 @@ async function saveSettings(event) {
         welcomeChannelId: channelId,
         welcomeMessage: channelId ? welcomeMessage : null,
         autoModerationEnabled: document.getElementById("autoModerationEnabled").checked,
-        levelingEnabled: document.getElementById("levelingEnabled").checked
+        levelingEnabled: document.getElementById("levelingEnabled").checked,
+        dashboardWebhookUrl: document.getElementById("dashboardWebhookUrl").value,
+        clearDashboardWebhook: document.getElementById("clearDashboardWebhook").checked
       })
     });
     currentOverview.settings = result.settings;
+    document.getElementById("dashboardWebhookUrl").value = "";
     status.textContent = "Saved";
     showToast("Server settings saved.");
   } catch (error) {
@@ -448,6 +505,65 @@ async function postAnnouncement(event) {
     document.getElementById("announcementMessage").value = "";
     status.textContent = "Posted";
     showToast("Announcement posted.");
+  } catch (error) {
+    status.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function clearMessages(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const status = document.getElementById("clearStatus");
+  button.disabled = true;
+  status.textContent = "Clearing…";
+  try {
+    const result = await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/moderation/clear`, {
+      method: "POST",
+      body: JSON.stringify({
+        channelId: document.getElementById("clearChannel").value,
+        amount: Number(document.getElementById("clearAmount").value)
+      })
+    });
+    status.textContent = "Complete";
+    showToast(`Deleted ${result.deleted} recent message(s).`);
+  } catch (error) {
+    status.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function timeoutMember(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const status = document.getElementById("timeoutStatus");
+  const userId = document.getElementById("timeoutUserId").value.trim();
+  if (!/^\d{17,20}$/.test(userId)) {
+    showToast("Enter a valid Discord member ID.", true);
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "Applying…";
+  try {
+    const durationMinutes = Number(document.getElementById("timeoutDuration").value);
+    await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/moderation/timeout`, {
+      method: "POST",
+      body: JSON.stringify({
+        userId,
+        durationMinutes,
+        reason: document.getElementById("timeoutReason").value
+      })
+    });
+    document.getElementById("timeoutUserId").value = "";
+    document.getElementById("timeoutReason").value = "";
+    status.textContent = "Applied";
+    showToast(`Timeout applied for ${formatSlowmode(durationMinutes * 60)}.`);
   } catch (error) {
     status.textContent = "";
     showToast(error.message, true);

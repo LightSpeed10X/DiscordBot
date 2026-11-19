@@ -1,3 +1,4 @@
+import "dotenv/config";
 import {
   Client,
   ChannelType,
@@ -499,8 +500,12 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
 
 client.once(Events.ClientReady, readyClient => {
   console.log(`Ready as ${readyClient.user.tag}`);
+  const levelingGuildCount = readyClient.guilds.cache.filter(
+    guild => getGuildSettings(guild.id).levelingEnabled
+  ).size;
+  console.log(`Activity leveling enabled in ${levelingGuildCount} server(s).`);
   if (config.dashboard) {
-    void startDashboard(readyClient, config.dashboard, config.clientId).catch(error => {
+    void startDashboard(readyClient, config.dashboard, config.clientId, config.logWebhookUrl).catch(error => {
       console.error(`Dashboard startup failed (${error instanceof Error ? error.message : "unknown error"}).`);
     });
   } else {

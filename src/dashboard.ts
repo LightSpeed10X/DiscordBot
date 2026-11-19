@@ -25,6 +25,7 @@ import {
   updateGuildSettings,
   type GuildSettings
 } from "./guild-settings.js";
+import { isDiscordWebhookUrl, sendDiscordWebhookLog } from "./webhooks.js";
 
 interface DashboardUser {
   id: string;
@@ -111,6 +112,37 @@ function getSession(req: Request): { user: DashboardUser; accessToken: string } 
     throw new HttpError(401, "Please sign in with Discord.");
   }
   return { user: req.session.user, accessToken: req.session.accessToken };
+}
+
+function getPublicGuildSettings(settings: GuildSettings) {
+  const { dashboardWebhookUrl, ...publicSettings } = settings;
+  return {
+    ...publicSettings,
+    dashboardWebhookConfigured: Boolean(dashboardWebhookUrl)
+  };
+}
+
+function logDashboardAction(
+  guild: Guild,
+  actor: DashboardUser,
+  action: string,
+  details: string,
+  fallbackWebhookUrl?: string
+): void {
+  const webhookUrl = getGuildSettings(guild.id).dashboardWebhookUrl ?? fallbackWebhookUrl;
+  if (!webhookUrl) return;
+  void sendDiscordWebhookLog(webhookUrl, {
+    title: `Dashboard · ${action}`,
+    color: 0x5865f2,
+    timestamp: new Date().toISOString(),
+    fields: [
+      { name: "Server", value: `${guild.name} (${guild.id})` },
+      { name: "Moderator", value: `${actor.username} (${actor.id})` },
+      { name: "Action", value: details.slice(0, 1000) }
+    ]
+  }).catch(error => {
+    console.error(`Dashboard webhook failed in guild ${guild.id} (${error instanceof Error ? error.name : "unknown error"}).`);
+  });
 }
 
 function getGuildId(req: Request): string {
@@ -268,7 +300,8 @@ function getPublicDirectory(): string {
 export async function startDashboard(
   client: Client<true>,
   config: DashboardConfig,
-  clientId: string
+  clientId: string,
+  fallbackWebhookUrl?: string
 ): Promise<Server> {
   const app = express();
   const publicDirectory = getPublicDirectory();
@@ -443,7 +476,7 @@ export async function startDashboard(
         icon: guild.iconURL({ size: 128 }),
         memberCount: guild.memberCount
       },
-      settings: getGuildSettings(guild.id),
+      settings: getPublicGuildSettings(getGuildSettings(guild.id)),
       channels,
       commands: commands.map(command => ({
         name: command.name,
@@ -468,7 +501,7 @@ export async function startDashboard(
   }));
 
   app.put("/api/guilds/:guildId/channels/slowmode", asyncRoute(async (req, res) => {
-    const { accessToken } = getSession(req);
+    const { user, accessToken } = getSession(req);
     verifyDashboardMutation(req, config.baseUrl);
     const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
       permission: PermissionFlagsBits.ManageChannels,
@@ -490,16 +523,29 @@ export async function startDashboard(
     if (!channel || channel.type !== ChannelType.GuildText) {
       throw new HttpError(400, "Choose a regular server text channel.");
     }
-    const botMember = await guild.members.fetchMe();
+    const [actor, botMember] = await Promise.all([
+      guild.members.fetch(user.id),
+      guild.members.fetchMe()
+    ]);
+    if (!channel.permissionsFor(actor)?.has(PermissionFlagsBits.ManageChannels)) {
+      throw new HttpError(403, "You need Manage Channels in the selected channel.");
+    }
     if (!channel.permissionsFor(botMember)?.has(PermissionFlagsBits.ManageChannels)) {
       throw new HttpError(400, "The bot needs Manage Channels in the selected channel.");
     }
     await channel.setRateLimitPerUser(body.seconds, "Changed from the dashboard");
+    logDashboardAction(
+      guild,
+      user,
+      "Slowmode changed",
+      `#${channel.name}: ${body.seconds === 0 ? "disabled" : `${body.seconds} second(s)`}`,
+      fallbackWebhookUrl
+    );
     res.json({ channelId: channel.id, seconds: body.seconds });
   }));
 
   app.post("/api/guilds/:guildId/announcements", asyncRoute(async (req, res) => {
-    const { accessToken } = getSession(req);
+    const { user, accessToken } = getSession(req);
     verifyDashboardMutation(req, config.baseUrl);
     const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
       permission: PermissionFlagsBits.ManageMessages,
@@ -520,7 +566,13 @@ export async function startDashboard(
     if (!channel || channel.type !== ChannelType.GuildText) {
       throw new HttpError(400, "Choose a regular server text channel.");
     }
-    const botMember = await guild.members.fetchMe();
+    const [actor, botMember] = await Promise.all([
+      guild.members.fetch(user.id),
+      guild.members.fetchMe()
+    ]);
+    if (!channel.permissionsFor(actor)?.has(PermissionFlagsBits.ManageMessages)) {
+      throw new HttpError(403, "You need Manage Messages in the selected channel.");
+    }
     if (!channel.permissionsFor(botMember)?.has([
       PermissionFlagsBits.ViewChannel,
       PermissionFlagsBits.SendMessages
@@ -531,11 +583,111 @@ export async function startDashboard(
       content: body.message.trim(),
       allowedMentions: { parse: [] }
     });
+    logDashboardAction(
+      guild,
+      user,
+      "Announcement posted",
+      `Posted in #${channel.name} (message ${message.id}); message content omitted.`,
+      fallbackWebhookUrl
+    );
     res.status(201).json({ messageId: message.id });
   }));
 
+  app.post("/api/guilds/:guildId/moderation/clear", asyncRoute(async (req, res) => {
+    const { user, accessToken } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
+      permission: PermissionFlagsBits.ManageMessages,
+      message: "You need Manage Messages to clear messages."
+    });
+    const body: unknown = req.body;
+    if (
+      !isRecord(body) ||
+      typeof body.channelId !== "string" ||
+      !/^\d{17,20}$/.test(body.channelId) ||
+      typeof body.amount !== "number" ||
+      !Number.isInteger(body.amount) ||
+      body.amount < 1 ||
+      body.amount > 100
+    ) {
+      throw new HttpError(400, "Choose a text channel and a message count from 1 to 100.");
+    }
+    const channel = await guild.channels.fetch(body.channelId);
+    if (!channel || channel.type !== ChannelType.GuildText) {
+      throw new HttpError(400, "Choose a regular server text channel.");
+    }
+    const [actor, botMember] = await Promise.all([
+      guild.members.fetch(user.id),
+      guild.members.fetchMe()
+    ]);
+    if (!channel.permissionsFor(actor)?.has(PermissionFlagsBits.ManageMessages)) {
+      throw new HttpError(403, "You need Manage Messages in the selected channel.");
+    }
+    if (!channel.permissionsFor(botMember)?.has(PermissionFlagsBits.ManageMessages)) {
+      throw new HttpError(400, "The bot needs Manage Messages in the selected channel.");
+    }
+    const deleted = await channel.bulkDelete(body.amount, true);
+    logDashboardAction(
+      guild,
+      user,
+      "Messages cleared",
+      `Deleted ${deleted.size} recent message(s) in #${channel.name}.`,
+      fallbackWebhookUrl
+    );
+    res.json({ deleted: deleted.size });
+  }));
+
+  app.post("/api/guilds/:guildId/moderation/timeout", asyncRoute(async (req, res) => {
+    const { user, accessToken } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
+      permission: PermissionFlagsBits.ModerateMembers,
+      message: "You need Moderate Members to timeout a member."
+    });
+    const body: unknown = req.body;
+    if (
+      !isRecord(body) ||
+      typeof body.userId !== "string" ||
+      !/^\d{17,20}$/.test(body.userId) ||
+      typeof body.durationMinutes !== "number" ||
+      !Number.isInteger(body.durationMinutes) ||
+      body.durationMinutes < 1 ||
+      body.durationMinutes > 40320 ||
+      typeof body.reason !== "string" ||
+      body.reason.length > 500
+    ) {
+      throw new HttpError(400, "Enter a valid member ID, a timeout from 1 to 40,320 minutes, and a reason under 500 characters.");
+    }
+    const [actor, botMember, target] = await Promise.all([
+      guild.members.fetch(user.id),
+      guild.members.fetchMe(),
+      guild.members.fetch(body.userId)
+    ]);
+    if (!actor.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+      throw new HttpError(403, "You need Moderate Members to timeout a member.");
+    }
+    if (target.id === actor.id) throw new HttpError(400, "You cannot timeout yourself.");
+    if (target.id === botMember.id) throw new HttpError(400, "The bot cannot timeout itself.");
+    if (actor.id !== guild.ownerId && actor.roles.highest.comparePositionTo(target.roles.highest) <= 0) {
+      throw new HttpError(403, "You can only timeout members with a lower role than yours.");
+    }
+    if (!target.moderatable) {
+      throw new HttpError(403, "The bot cannot timeout that member. Check role hierarchy and permissions.");
+    }
+    const reason = body.reason.trim() || `Dashboard timeout by ${user.username}`;
+    await target.timeout(body.durationMinutes * 60_000, reason);
+    logDashboardAction(
+      guild,
+      user,
+      "Member timed out",
+      `Timed out ${target.user.tag} (${target.id}) for ${body.durationMinutes} minute(s).`,
+      fallbackWebhookUrl
+    );
+    res.json({ userId: target.id, durationMinutes: body.durationMinutes });
+  }));
+
   app.put("/api/guilds/:guildId/settings", asyncRoute(async (req, res) => {
-    const { accessToken } = getSession(req);
+    const { user, accessToken } = getSession(req);
     verifyDashboardMutation(req, config.baseUrl);
 
     const guild = await authorizeGuild(client, accessToken, getGuildId(req));
@@ -545,11 +697,21 @@ export async function startDashboard(
       typeof body.embedColor !== "string" ||
       !/^#[0-9a-fA-F]{6}$/.test(body.embedColor) ||
       typeof body.autoModerationEnabled !== "boolean" ||
-      typeof body.levelingEnabled !== "boolean"
+      typeof body.levelingEnabled !== "boolean" ||
+      typeof body.dashboardWebhookUrl !== "string" ||
+      body.dashboardWebhookUrl.length > 300 ||
+      typeof body.clearDashboardWebhook !== "boolean"
     ) {
       throw new HttpError(400, "Enter valid feature settings and a six-digit hex embed color.");
     }
 
+    const webhookUrl = body.dashboardWebhookUrl.trim();
+    if (webhookUrl && !isDiscordWebhookUrl(webhookUrl)) {
+      throw new HttpError(400, "Enter a valid HTTPS Discord webhook URL.");
+    }
+    if (webhookUrl && body.clearDashboardWebhook) {
+      throw new HttpError(400, "Set a webhook URL or clear the saved webhook, not both.");
+    }
     const autoModerationEnabled = body.autoModerationEnabled;
     const levelingEnabled = body.levelingEnabled;
     const update: Partial<GuildSettings> = {
@@ -557,6 +719,8 @@ export async function startDashboard(
       autoModerationEnabled,
       levelingEnabled
     };
+    if (webhookUrl) update.dashboardWebhookUrl = webhookUrl;
+    else if (body.clearDashboardWebhook) update.dashboardWebhookUrl = undefined;
     if (body.welcomeChannelId === null && body.welcomeMessage === null) {
       update.welcomeChannelId = undefined;
       update.welcomeMessage = undefined;
@@ -588,7 +752,14 @@ export async function startDashboard(
       await syncAutoModerationRules(guild, autoModerationEnabled);
     }
     const settings = await updateGuildSettings(guild.id, update);
-    res.json({ settings });
+    logDashboardAction(
+      guild,
+      user,
+      "Settings updated",
+      `Updated server preferences (auto-moderation ${settings.autoModerationEnabled ? "on" : "off"}, levels ${settings.levelingEnabled ? "on" : "off"}).`,
+      fallbackWebhookUrl
+    );
+    res.json({ settings: getPublicGuildSettings(settings) });
   }));
 
   app.get(/.*/, (_req, res) => {
