@@ -11,8 +11,8 @@ let currentGuildId = "";
 let currentOverview = null;
 let currentPanel = "overview";
 let currentLogs = [];
-let currentLeaderboard = [];
 let activityStream = null;
+let analyticsPeriod = 30;
 let toastTimer;
 
 const panelDetails = {
@@ -21,17 +21,22 @@ const panelDetails = {
   tools: ["Server tools", "Tune channels, announce updates, and manage members."],
   commands: ["Command library", "Everything your community can ask the bot to do."],
   logs: ["Activity logs", "Recent command and dashboard activity for this server."],
-  status: ["Bot status", "Set the bot's global presence and activity."]
+  analytics: ["Server analytics", "Compare activity, growth, moderation, and tickets."],
+  status: ["Bot status", "Set the bot's global presence and activity."],
 };
 
 function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, character => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "\"": "&quot;",
-    "'": "&#39;"
-  })[character]);
+  return String(value).replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[character],
+  );
 }
 
 async function api(path, options = {}) {
@@ -90,7 +95,7 @@ function setGuildOptions() {
   }
   guildSelect.disabled = guilds.length === 0;
   const rememberedId = window.localStorage.getItem("orbit.guild");
-  currentGuildId = guilds.some(guild => guild.id === rememberedId)
+  currentGuildId = guilds.some((guild) => guild.id === rememberedId)
     ? rememberedId
     : guilds[0]?.id || "";
   if (currentGuildId) guildSelect.value = currentGuildId;
@@ -100,7 +105,7 @@ function setPanelHeading() {
   const [title, subtitle] = panelDetails[currentPanel];
   document.getElementById("pageTitle").textContent = title;
   document.getElementById("pageSubtitle").textContent = subtitle;
-  document.querySelectorAll(".nav-item").forEach(button => {
+  document.querySelectorAll(".nav-item").forEach((button) => {
     button.classList.toggle("active", button.dataset.panel === currentPanel);
   });
 }
@@ -112,7 +117,7 @@ function formatTime(value) {
     month: "short",
     day: "numeric",
     hour: "numeric",
-    minute: "2-digit"
+    minute: "2-digit",
   }).format(date);
 }
 
@@ -120,12 +125,17 @@ function activityRows(logs) {
   if (!logs.length) {
     return '<div class="empty-state"><h2>Nothing logged yet</h2><p>Command activity will appear here after someone uses a slash command in this server.</p></div>';
   }
-  return `<div class="activity-list">${logs.slice(0, 6).map(log => `
+  return `<div class="activity-list">${logs
+    .slice(0, 6)
+    .map(
+      (log) => `
     <div class="activity-row">
       <span class="activity-command">${log.source === "dashboard" ? "Dashboard · " : "/"}${escapeHtml(log.commandName)}</span>
       <span class="activity-user">${escapeHtml(log.userName)}</span>
       <span class="activity-time">${escapeHtml(formatTime(log.timestamp))}</span>
-    </div>`).join("")}</div>`;
+    </div>`,
+    )
+    .join("")}</div>`;
 }
 
 function logKey(log) {
@@ -147,7 +157,7 @@ function connectActivityStream(guildId) {
 
   const stream = new EventSource(`/api/guilds/${encodeURIComponent(guildId)}/events`);
   activityStream = stream;
-  stream.addEventListener("command-log", event => {
+  stream.addEventListener("command-log", (event) => {
     try {
       const log = JSON.parse(event.data);
       currentLogs = mergeLogs([log], currentLogs);
@@ -167,7 +177,6 @@ function connectActivityStream(guildId) {
 
 function renderOverview(logs, leaderboard) {
   currentLogs = logs;
-  currentLeaderboard = leaderboard;
   const settings = currentOverview.settings;
   const welcomeConfigured = Boolean(settings.welcomeChannelId && settings.welcomeMessage);
   panelContent.innerHTML = `
@@ -233,14 +242,73 @@ function renderOverview(logs, leaderboard) {
         <div class="panel-heading">
           <div><h2>Activity leaderboard</h2><p>Members ranked by message activity XP.</p></div>
         </div>
-        ${leaderboard.length
-          ? `<div class="activity-list">${leaderboard.slice(0, 5).map((entry, index) => `
+        ${
+          leaderboard.length
+            ? `<div class="activity-list">${leaderboard
+                .slice(0, 5)
+                .map(
+                  (entry, index) => `
             <div class="activity-row">
               <span class="activity-command">#${index + 1} ${escapeHtml(entry.username)}</span>
               <span class="activity-user">Level ${entry.level}</span>
               <span class="activity-time">${Number(entry.xp).toLocaleString()} XP</span>
-            </div>`).join("")}</div>`
-          : '<div class="empty-state"><h2>No levels yet</h2><p>Enable activity levels in Quick setup to start the leaderboard.</p></div>'}
+            </div>`,
+                )
+                .join("")}</div>`
+            : '<div class="empty-state"><h2>No levels yet</h2><p>Enable activity levels in Quick setup to start the leaderboard.</p></div>'
+        }
+      </section>
+    </div>`;
+}
+
+function renderAnalytics(data) {
+  const commandRows = data.commandUsage.slice(-15).reverse();
+  panelContent.innerHTML = `
+    <div class="panel-heading">
+      <div><h2>Server activity</h2><p>Aggregated activity only; message content is never stored.</p></div>
+      <label class="field">Period
+        <select id="analyticsDays">
+          ${[7, 30, 90].map((days) => `<option value="${days}" ${days === data.periodDays ? "selected" : ""}>${days} days</option>`).join("")}
+        </select>
+      </label>
+    </div>
+    <div class="stat-grid">
+      <article class="stat-card"><div class="stat-top"><span>Messages this week</span></div><div class="stat-value">${data.comparison.messagesThisWeek.toLocaleString()}</div><div class="stat-caption">Previous week: ${data.comparison.messagesLastWeek.toLocaleString()}</div></article>
+      <article class="stat-card"><div class="stat-top"><span>Member change</span></div><div class="stat-value">${data.comparison.memberChange > 0 ? "+" : ""}${data.comparison.memberChange.toLocaleString()}</div><div class="stat-caption">Across the selected period</div></article>
+      <article class="stat-card"><div class="stat-top"><span>Command activity</span></div><div class="stat-value">${data.commandUsage.reduce((sum, item) => sum + item.uses, 0).toLocaleString()}</div><div class="stat-caption">Tracked slash commands</div></article>
+      <article class="stat-card"><div class="stat-top"><span>Moderation actions</span></div><div class="stat-value">${data.moderationActions.reduce((sum, item) => sum + item.count, 0).toLocaleString()}</div><div class="stat-caption">${data.tickets.reduce((sum, item) => sum + item.count, 0).toLocaleString()} tickets total</div></article>
+    </div>
+    <div class="content-grid">
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Daily activity</h2><p>Message counts and member snapshots by day.</p></div></div>
+        <div class="table-wrap"><table class="logs-table"><thead><tr><th>Date</th><th>Messages</th><th>Members</th></tr></thead><tbody>
+          ${
+            data.dailyActivity.length
+              ? data.dailyActivity
+                  .slice(-15)
+                  .reverse()
+                  .map(
+                    (row) =>
+                      `<tr><td>${escapeHtml(row.date)}</td><td>${row.messages.toLocaleString()}</td><td>${row.members.toLocaleString()}</td></tr>`,
+                  )
+                  .join("")
+              : '<tr><td colspan="3">No activity recorded yet.</td></tr>'
+          }
+        </tbody></table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Command usage</h2><p>Most recent command totals.</p></div></div>
+        <div class="table-wrap"><table class="logs-table"><thead><tr><th>Date</th><th>Command</th><th>Uses</th></tr></thead><tbody>
+          ${commandRows.length ? commandRows.map((row) => `<tr><td>${escapeHtml(row.date)}</td><td>/${escapeHtml(row.command)}</td><td>${row.uses.toLocaleString()}</td></tr>`).join("") : '<tr><td colspan="3">No commands recorded yet.</td></tr>'}
+        </tbody></table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Moderation</h2><p>Recorded actions in the selected period.</p></div></div>
+        <div class="activity-list">${data.moderationActions.length ? data.moderationActions.map((item) => `<div class="activity-row"><span class="activity-command">${escapeHtml(item.action)}</span><span>${item.count.toLocaleString()}</span></div>`).join("") : '<div class="empty-state"><p>No moderation actions recorded.</p></div>'}</div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><h2>Tickets</h2><p>Current ticket states.</p></div></div>
+        <div class="activity-list">${data.tickets.length ? data.tickets.map((item) => `<div class="activity-row"><span class="activity-command">${escapeHtml(item.status)}</span><span>${item.count.toLocaleString()}</span></div>`).join("") : '<div class="empty-state"><p>No tickets recorded.</p></div>'}</div>
       </section>
     </div>`;
 }
@@ -250,7 +318,28 @@ function renderSetup() {
   const channels = currentOverview.channels;
   const categories = currentOverview.ticketCategories;
   const roles = currentOverview.roles;
+  const featureRoles = settings.featurePermissionRoles || {};
   const selectedChannel = settings.welcomeChannelId || "";
+  const roleSelectors = currentOverview.canManageFeatureRoles
+    ? [
+        ["analytics", "Analytics and leaderboards"],
+        ["activity", "Activity logs"],
+        ["moderation", "Moderation tools and history"],
+        ["server_tools", "Announcements, channels, and member tools"],
+        ["tickets", "Ticket management"],
+        ["settings", "Server bot settings"],
+      ]
+        .map(([feature, label]) => {
+          const assignedRoles = featureRoles[feature] || [];
+          return `<div class="field">
+      <label for="dashboardRoles_${feature}">${label}</label>
+      <select id="dashboardRoles_${feature}" multiple size="3">
+        ${roles.map((role) => `<option value="${escapeHtml(role.id)}" ${assignedRoles.includes(role.id) ? "selected" : ""}>@${escapeHtml(role.name)}</option>`).join("")}
+      </select>
+    </div>`;
+        })
+        .join("")
+    : "";
   panelContent.innerHTML = `
     <div class="setup-layout">
       <section class="panel">
@@ -265,7 +354,7 @@ function renderSetup() {
             <label for="welcomeChannel">Welcome channel</label>
             <select id="welcomeChannel" name="welcomeChannel">
               <option value="">Welcome messages off</option>
-              ${channels.map(channel => `<option value="${escapeHtml(channel.id)}" ${channel.id === selectedChannel ? "selected" : ""}>#${escapeHtml(channel.name)}</option>`).join("")}
+              ${channels.map((channel) => `<option value="${escapeHtml(channel.id)}" ${channel.id === selectedChannel ? "selected" : ""}>#${escapeHtml(channel.name)}</option>`).join("")}
             </select>
           </div>
           <div class="field">
@@ -277,7 +366,7 @@ function renderSetup() {
             <label for="ticketCategory">Ticket category</label>
             <select id="ticketCategory" name="ticketCategory">
               <option value="">Use the server's default channel list</option>
-              ${categories.map(category => `<option value="${escapeHtml(category.id)}" ${category.id === settings.ticketCategoryId ? "selected" : ""}>${escapeHtml(category.name)}</option>`).join("")}
+              ${categories.map((category) => `<option value="${escapeHtml(category.id)}" ${category.id === settings.ticketCategoryId ? "selected" : ""}>${escapeHtml(category.name)}</option>`).join("")}
             </select>
             <span class="field-hint">New private ticket channels will be created here.</span>
           </div>
@@ -285,10 +374,15 @@ function renderSetup() {
             <label for="ticketSupportRole">Ticket support role</label>
             <select id="ticketSupportRole" name="ticketSupportRole">
               <option value="">No additional support role</option>
-              ${roles.map(role => `<option value="${escapeHtml(role.id)}" ${role.id === settings.ticketSupportRoleId ? "selected" : ""}>@${escapeHtml(role.name)}</option>`).join("")}
+              ${roles.map((role) => `<option value="${escapeHtml(role.id)}" ${role.id === settings.ticketSupportRoleId ? "selected" : ""}>@${escapeHtml(role.name)}</option>`).join("")}
             </select>
             <span class="field-hint">Members with this role can view and reply in open tickets.</span>
           </div>
+          <div class="field">
+            <label>Dashboard staff roles</label>
+            <span class="field-hint">${currentOverview.canManageFeatureRoles ? "Selected roles grant access only to their listed dashboard area. Members with Manage Server retain full access." : "Only members with Manage Server can change dashboard role assignments."}</span>
+          </div>
+          ${roleSelectors}
           <div class="field feature-toggle">
             <label for="autoModerationEnabled">Discord auto-moderation</label>
             <div class="toggle-row">
@@ -334,10 +428,32 @@ function formatSlowmode(seconds) {
 function renderServerTools() {
   const channels = currentOverview.channels;
   const channelOptions = channels.length
-    ? channels.map(channel => `<option value="${escapeHtml(channel.id)}">#${escapeHtml(channel.name)}</option>`).join("")
+    ? channels
+        .map(
+          (channel) =>
+            `<option value="${escapeHtml(channel.id)}">#${escapeHtml(channel.name)}</option>`,
+        )
+        .join("")
     : '<option value="">No text channels available</option>';
-  const slowmodeValues = [...new Set([0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600,
-    ...channels.map(channel => channel.slowmodeSeconds)])].sort((left, right) => left - right);
+  const slowmodeValues = [
+    ...new Set([
+      0,
+      5,
+      10,
+      15,
+      30,
+      60,
+      120,
+      300,
+      600,
+      900,
+      1800,
+      3600,
+      7200,
+      21600,
+      ...channels.map((channel) => channel.slowmodeSeconds),
+    ]),
+  ].sort((left, right) => left - right);
   const initialSlowmode = channels[0]?.slowmodeSeconds ?? 0;
   panelContent.innerHTML = `
     <div class="tools-grid">
@@ -354,7 +470,7 @@ function renderServerTools() {
           <div class="field">
             <label for="slowmodeSeconds">Delay</label>
             <select id="slowmodeSeconds" name="seconds" ${channels.length ? "" : "disabled"}>
-              ${slowmodeValues.map(seconds => `<option value="${seconds}" ${seconds === initialSlowmode ? "selected" : ""}>${formatSlowmode(seconds)}</option>`).join("")}
+              ${slowmodeValues.map((seconds) => `<option value="${seconds}" ${seconds === initialSlowmode ? "selected" : ""}>${formatSlowmode(seconds)}</option>`).join("")}
             </select>
           </div>
           <div class="form-actions"><button class="primary-button" type="submit" ${channels.length ? "" : "disabled"}>Apply slowmode</button><span id="slowmodeStatus" class="field-hint" role="status"></span></div>
@@ -450,7 +566,7 @@ function renderServerTools() {
   const slowmodeChannel = document.getElementById("slowmodeChannel");
   const slowmodeSelect = document.getElementById("slowmodeSeconds");
   slowmodeChannel.addEventListener("change", () => {
-    const channel = channels.find(item => item.id === slowmodeChannel.value);
+    const channel = channels.find((item) => item.id === slowmodeChannel.value);
     if (channel) slowmodeSelect.value = String(channel.slowmodeSeconds);
   });
   document.getElementById("slowmodeForm").addEventListener("submit", setSlowmode);
@@ -461,7 +577,8 @@ function renderServerTools() {
 }
 
 async function renderBotStatus() {
-  panelContent.innerHTML = '<div class="loading-card"><span class="spinner"></span> Loading bot status…</div>';
+  panelContent.innerHTML =
+    '<div class="loading-card"><span class="spinner"></span> Loading bot status…</div>';
   try {
     const presence = await api("/api/bot/presence");
     panelContent.innerHTML = `
@@ -472,15 +589,33 @@ async function renderBotStatus() {
             <div class="field">
               <label for="presenceStatus">Status</label>
               <select id="presenceStatus">
-                ${[["online", "Online"], ["idle", "Idle"], ["dnd", "Do not disturb"], ["invisible", "Invisible"]]
-                  .map(([value, label]) => `<option value="${value}" ${presence.status === value ? "selected" : ""}>${label}</option>`).join("")}
+                ${[
+                  ["online", "Online"],
+                  ["idle", "Idle"],
+                  ["dnd", "Do not disturb"],
+                  ["invisible", "Invisible"],
+                ]
+                  .map(
+                    ([value, label]) =>
+                      `<option value="${value}" ${presence.status === value ? "selected" : ""}>${label}</option>`,
+                  )
+                  .join("")}
               </select>
             </div>
             <div class="field">
               <label for="presenceActivityType">Activity type</label>
               <select id="presenceActivityType">
-                ${[["playing", "Playing"], ["listening", "Listening to"], ["watching", "Watching"], ["competing", "Competing in"]]
-                  .map(([value, label]) => `<option value="${value}" ${presence.activityType === value ? "selected" : ""}>${label}</option>`).join("")}
+                ${[
+                  ["playing", "Playing"],
+                  ["listening", "Listening to"],
+                  ["watching", "Watching"],
+                  ["competing", "Competing in"],
+                ]
+                  .map(
+                    ([value, label]) =>
+                      `<option value="${value}" ${presence.activityType === value ? "selected" : ""}>${label}</option>`,
+                  )
+                  .join("")}
               </select>
             </div>
             <div class="field">
@@ -515,11 +650,17 @@ function renderCommands() {
   const list = document.getElementById("commandList");
   const draw = () => {
     const query = input.value.trim().toLowerCase();
-    const matches = currentOverview.commands.filter(command =>
-      command.name.includes(query) || command.description.toLowerCase().includes(query)
+    const matches = currentOverview.commands.filter(
+      (command) =>
+        command.name.includes(query) || command.description.toLowerCase().includes(query),
     );
     list.innerHTML = matches.length
-      ? matches.map(command => `<article class="command-card"><code>/${escapeHtml(command.name)}</code><p>${escapeHtml(command.description)}</p></article>`).join("")
+      ? matches
+          .map(
+            (command) =>
+              `<article class="command-card"><code>/${escapeHtml(command.name)}</code><p>${escapeHtml(command.description)}</p></article>`,
+          )
+          .join("")
       : '<div class="empty-state"><h2>No matching commands</h2><p>Try a different search.</p></div>';
   };
   input.addEventListener("input", draw);
@@ -527,13 +668,17 @@ function renderCommands() {
 }
 
 function logTableRows(logs) {
-  return logs.map(log => `<tr>
+  return logs
+    .map(
+      (log) => `<tr>
     <td>${log.source === "dashboard" ? "Dashboard · " : "/"}${escapeHtml(log.commandName)}</td>
     <td>${escapeHtml(log.userName)}</td>
     <td>${escapeHtml(log.channelId ? `#${log.channelId}` : "Unknown")}</td>
     <td><span class="status-pill ${log.outcome === "error" ? "error" : ""}">${escapeHtml(log.outcome)}</span></td>
     <td>${escapeHtml(formatTime(log.timestamp))}</td>
-  </tr>`).join("");
+  </tr>`,
+    )
+    .join("");
 }
 
 function renderLogs(logs) {
@@ -541,10 +686,14 @@ function renderLogs(logs) {
   panelContent.innerHTML = `
     <section class="panel">
       <div class="panel-heading"><div><h2>Server activity</h2><p>Recent commands and dashboard actions for ${escapeHtml(currentOverview.guild.name)}. Message content and command arguments are not logged.</p></div></div>
-      ${logs.length ? `<div class="table-wrap"><table class="logs-table">
+      ${
+        logs.length
+          ? `<div class="table-wrap"><table class="logs-table">
         <thead><tr><th>Command</th><th>Member</th><th>Channel</th><th>Result</th><th>Time</th></tr></thead>
         <tbody id="logsBody">${logTableRows(logs)}</tbody>
-      </table></div>` : '<div class="empty-state"><h2>No activity yet</h2><p>Use a slash command in this server and its metadata will appear here.</p></div>'}
+      </table></div>`
+          : '<div class="empty-state"><h2>No activity yet</h2><p>Use a slash command in this server and its metadata will appear here.</p></div>'
+      }
     </section>`;
 }
 
@@ -573,8 +722,20 @@ async function saveSettings(event) {
         ticketCategoryId: document.getElementById("ticketCategory").value || null,
         ticketSupportRoleId: document.getElementById("ticketSupportRole").value || null,
         dashboardWebhookUrl: document.getElementById("dashboardWebhookUrl").value,
-        clearDashboardWebhook: document.getElementById("clearDashboardWebhook").checked
-      })
+        clearDashboardWebhook: document.getElementById("clearDashboardWebhook").checked,
+        featurePermissionRoles: currentOverview.canManageFeatureRoles
+          ? Object.fromEntries(
+              ["analytics", "activity", "moderation", "server_tools", "tickets", "settings"].map(
+                (feature) => [
+                  feature,
+                  Array.from(
+                    document.getElementById(`dashboardRoles_${feature}`).selectedOptions,
+                  ).map((option) => option.value),
+                ],
+              ),
+            )
+          : undefined,
+      }),
     });
     currentOverview.settings = result.settings;
     document.getElementById("dashboardWebhookUrl").value = "";
@@ -600,9 +761,9 @@ async function setSlowmode(event) {
     const seconds = Number(document.getElementById("slowmodeSeconds").value);
     await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/channels/slowmode`, {
       method: "PUT",
-      body: JSON.stringify({ channelId, seconds })
+      body: JSON.stringify({ channelId, seconds }),
     });
-    const channel = currentOverview.channels.find(item => item.id === channelId);
+    const channel = currentOverview.channels.find((item) => item.id === channelId);
     if (channel) channel.slowmodeSeconds = seconds;
     status.textContent = "Updated";
     showToast(`Slowmode ${seconds ? `set to ${formatSlowmode(seconds)}` : "disabled"}.`);
@@ -631,8 +792,8 @@ async function postAnnouncement(event) {
       method: "POST",
       body: JSON.stringify({
         channelId: document.getElementById("announcementChannel").value,
-        message
-      })
+        message,
+      }),
     });
     document.getElementById("announcementMessage").value = "";
     status.textContent = "Posted";
@@ -657,8 +818,8 @@ async function clearMessages(event) {
       method: "POST",
       body: JSON.stringify({
         channelId: document.getElementById("clearChannel").value,
-        amount: Number(document.getElementById("clearAmount").value)
-      })
+        amount: Number(document.getElementById("clearAmount").value),
+      }),
     });
     status.textContent = "Complete";
     showToast(`Deleted ${result.deleted} recent message(s).`);
@@ -684,18 +845,26 @@ async function timeoutMember(event) {
   status.textContent = "Applying…";
   try {
     const durationMinutes = Number(document.getElementById("timeoutDuration").value);
-    await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/moderation/timeout`, {
-      method: "POST",
-      body: JSON.stringify({
-        userId,
-        durationMinutes,
-        reason: document.getElementById("timeoutReason").value
-      })
-    });
+    const result = await api(
+      `/api/guilds/${encodeURIComponent(currentGuildId)}/moderation/timeout`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          userId,
+          durationMinutes,
+          reason: document.getElementById("timeoutReason").value,
+        }),
+      },
+    );
     document.getElementById("timeoutUserId").value = "";
     document.getElementById("timeoutReason").value = "";
     status.textContent = "Applied";
-    showToast(`Timeout applied for ${formatSlowmode(durationMinutes * 60)}.`);
+    showToast(
+      result.auditSaved
+        ? `Timeout applied for ${formatSlowmode(durationMinutes * 60)}.`
+        : "Timeout applied, but moderation history could not be saved.",
+      !result.auditSaved,
+    );
   } catch (error) {
     status.textContent = "";
     showToast(error.message, true);
@@ -720,7 +889,7 @@ async function sendMemberDm(event) {
   try {
     await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/dm`, {
       method: "POST",
-      body: JSON.stringify({ userId, message, confirm: true })
+      body: JSON.stringify({ userId, message, confirm: true }),
     });
     document.getElementById("dmUserId").value = "";
     document.getElementById("dmMessage").value = "";
@@ -748,8 +917,8 @@ async function saveBotPresence(event) {
       body: JSON.stringify({
         status: document.getElementById("presenceStatus").value,
         activityType: document.getElementById("presenceActivityType").value,
-        activityText: document.getElementById("presenceActivityText").value
-      })
+        activityText: document.getElementById("presenceActivityText").value,
+      }),
     });
     statusMessage.textContent = "Saved";
     showToast("Bot presence updated.");
@@ -768,7 +937,8 @@ async function loadPanel() {
     return;
   }
   if (!currentGuildId || !currentOverview) {
-    panelContent.innerHTML = '<div class="empty-state"><h2>No manageable servers found</h2><p>Join a server, give yourself Manage Server, and add the bot there. Then refresh this page.</p></div>';
+    panelContent.innerHTML =
+      '<div class="empty-state"><h2>No manageable servers found</h2><p>Join a server, give yourself Manage Server, and add the bot there. Then refresh this page.</p></div>';
     return;
   }
 
@@ -784,17 +954,30 @@ async function loadPanel() {
     renderCommands();
     return;
   }
+  if (currentPanel === "analytics") {
+    panelContent.innerHTML =
+      '<div class="loading-card"><span class="spinner"></span> Loading server analytics…</div>';
+    try {
+      const analytics = await api(
+        `/api/guilds/${encodeURIComponent(currentGuildId)}/analytics?days=${analyticsPeriod}`,
+      );
+      if (currentPanel === "analytics") renderAnalytics(analytics);
+    } catch (error) {
+      panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load analytics</h2><p>${escapeHtml(error.message)}</p><button class="ghost-button" type="button" data-retry-panel>Try again</button></div>`;
+    }
+    return;
+  }
 
-  panelContent.innerHTML = '<div class="loading-card"><span class="spinner"></span> Loading activity…</div>';
+  panelContent.innerHTML =
+    '<div class="loading-card"><span class="spinner"></span> Loading activity…</div>';
   try {
     const [logs, leaderboard] = await Promise.all([
       api(`/api/guilds/${encodeURIComponent(currentGuildId)}/logs`),
       currentPanel === "overview"
         ? api(`/api/guilds/${encodeURIComponent(currentGuildId)}/leaderboard`)
-        : Promise.resolve([])
+        : Promise.resolve([]),
     ]);
     currentLogs = mergeLogs(logs, currentLogs);
-    currentLeaderboard = leaderboard;
     if (currentPanel === "logs") renderLogs(currentLogs);
     else renderOverview(currentLogs, leaderboard);
   } catch (error) {
@@ -807,7 +990,6 @@ async function loadGuild(guildId) {
     connectActivityStream("");
     currentOverview = null;
     currentLogs = [];
-    currentLeaderboard = [];
     document.getElementById("currentGuildName").textContent = "No server selected";
     await loadPanel();
     return;
@@ -815,13 +997,13 @@ async function loadGuild(guildId) {
   currentGuildId = guildId;
   window.localStorage.setItem("orbit.guild", guildId);
   document.getElementById("currentGuildName").textContent =
-    guilds.find(guild => guild.id === guildId)?.name || "Selected server";
-  panelContent.innerHTML = '<div class="loading-card"><span class="spinner"></span> Loading your server…</div>';
+    guilds.find((guild) => guild.id === guildId)?.name || "Selected server";
+  panelContent.innerHTML =
+    '<div class="loading-card"><span class="spinner"></span> Loading your server…</div>';
   try {
     currentOverview = await api(`/api/guilds/${encodeURIComponent(guildId)}`);
     document.getElementById("currentGuildName").textContent = currentOverview.guild.name;
     currentLogs = [];
-    currentLeaderboard = [];
     connectActivityStream(guildId);
     await loadPanel();
   } catch (error) {
@@ -854,13 +1036,19 @@ async function boot() {
 }
 
 guildSelect.addEventListener("change", () => loadGuild(guildSelect.value));
-document.querySelectorAll(".nav-item").forEach(button => {
+panelContent.addEventListener("change", (event) => {
+  if (event.target.id === "analyticsDays") {
+    analyticsPeriod = Number(event.target.value);
+    void loadPanel();
+  }
+});
+document.querySelectorAll(".nav-item").forEach((button) => {
   button.addEventListener("click", () => {
     currentPanel = button.dataset.panel;
     void loadPanel();
   });
 });
-panelContent.addEventListener("click", event => {
+panelContent.addEventListener("click", (event) => {
   const button = event.target.closest("[data-open-panel]");
   if (button) {
     currentPanel = button.dataset.openPanel;

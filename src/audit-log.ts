@@ -1,15 +1,5 @@
-import { randomUUID } from "node:crypto";
-import {
-  appendFile,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  writeFile
-} from "node:fs/promises";
-import { resolve } from "node:path";
-import { botDataDirectory } from "./guild-settings.js";
+import { getDatabase } from "./database/connection.js";
+import { logFailure } from "./utils/logger.js";
 
 export interface CommandAuditEntry {
   timestamp: string;
@@ -23,24 +13,15 @@ export interface CommandAuditEntry {
   source?: "command" | "dashboard";
 }
 
-const logsDirectory = resolve(botDataDirectory, "logs");
-const maxLogFileBytes = 2 * 1024 * 1024;
-const maxStoredEntries = 2000;
-let saveQueue: Promise<void> = Promise.resolve();
+interface StoredAuditEntry extends Omit<CommandAuditEntry, "source"> {
+  source: "command" | "dashboard";
+}
+
 const commandLogListeners = new Map<string, Set<(entry: CommandAuditEntry) => void>>();
-
-function isSnowflake(value: string): boolean {
-  return /^\d{17,20}$/.test(value);
-}
-
-function getLogPath(guildId: string): string {
-  if (!isSnowflake(guildId)) throw new Error("Invalid guild ID for command log.");
-  return resolve(logsDirectory, `${guildId}.jsonl`);
-}
 
 export function subscribeToCommandLogs(
   guildId: string,
-  listener: (entry: CommandAuditEntry) => void
+  listener: (entry: CommandAuditEntry) => void,
 ): () => void {
   const listeners = commandLogListeners.get(guildId) ?? new Set();
   listeners.add(listener);
@@ -56,81 +37,87 @@ function notifyCommandLogListeners(entry: CommandAuditEntry): void {
     try {
       listener(entry);
     } catch (error) {
-      console.error(`Command log listener failed (${error instanceof Error ? error.name : "unknown error"}).`);
+      logFailure("command.audit_listener_failed", error, { guildId: entry.guildId });
     }
   }
 }
 
-function isCommandAuditEntry(value: unknown): value is CommandAuditEntry {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const entry = value as Record<string, unknown>;
-  return (
-    typeof entry.timestamp === "string" &&
-    typeof entry.commandName === "string" &&
-    typeof entry.userName === "string" &&
-    typeof entry.userId === "string" &&
-    typeof entry.guildName === "string" &&
-    typeof entry.guildId === "string" &&
-    (entry.channelId === null || typeof entry.channelId === "string") &&
-    (entry.outcome === "completed" || entry.outcome === "error") &&
-    (entry.source === undefined || entry.source === "command" || entry.source === "dashboard")
-  );
-}
-
 export async function recordCommandLog(entry: CommandAuditEntry): Promise<void> {
-  const operation = saveQueue.then(async () => {
-    const path = getLogPath(entry.guildId);
-    await mkdir(logsDirectory, { recursive: true });
-    await appendFile(path, `${JSON.stringify(entry)}\n`, "utf8");
-
-    const file = await stat(path);
-    if (file.size > maxLogFileBytes) {
-      const lines = (await readFile(path, "utf8"))
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(-maxStoredEntries);
-      const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(temporaryPath, `${lines.join("\n")}\n`, { encoding: "utf8", flag: "wx" });
-        await rename(temporaryPath, path);
-      } finally {
-        await rm(temporaryPath, { force: true });
-      }
+  if (!/^\d{17,20}$/.test(entry.guildId)) throw new Error("Invalid guild ID for command log.");
+  if (!/^\d{17,20}$/.test(entry.userId)) throw new Error("Invalid user ID for command log.");
+  const source = entry.source ?? "command";
+  const db = getDatabase();
+  db.transaction(() => {
+    db.prepare("INSERT OR IGNORE INTO guilds (guild_id) VALUES (?)").run(entry.guildId);
+    db.prepare(
+      `
+      INSERT INTO command_audit (
+        timestamp, command_name, user_name, user_id, guild_name, guild_id, channel_id, outcome, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    ).run(
+      entry.timestamp,
+      entry.commandName,
+      entry.userName,
+      entry.userId,
+      entry.guildName,
+      entry.guildId,
+      entry.channelId,
+      entry.outcome,
+      source,
+    );
+    if (source === "command") {
+      db.prepare(
+        `
+        INSERT INTO guild_command_usage (guild_id, usage_date, command_name, use_count)
+        VALUES (?, date('now'), ?, 1)
+        ON CONFLICT(guild_id, usage_date, command_name)
+        DO UPDATE SET use_count = use_count + 1
+      `,
+      ).run(entry.guildId, entry.commandName);
     }
-    notifyCommandLogListeners(entry);
-  });
-  saveQueue = operation.then(() => undefined, () => undefined);
-  return operation;
+  })();
+  notifyCommandLogListeners(entry);
 }
 
 export async function getRecentCommandLogs(
   guildId: string,
-  requestedLimit = 100
+  requestedLimit = 100,
 ): Promise<CommandAuditEntry[]> {
-  const path = getLogPath(guildId);
+  if (!/^\d{17,20}$/.test(guildId)) throw new Error("Invalid guild ID for command log.");
   const limit = Number.isFinite(requestedLimit)
     ? Math.max(1, Math.min(200, Math.trunc(requestedLimit)))
     : 100;
-  await saveQueue;
-
-  let content: string;
-  try {
-    content = await readFile(path, "utf8");
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
-    throw new Error("Could not read command logs.", { cause: error });
-  }
-
-  return content
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .slice(-limit)
-    .reverse()
-    .map(line => {
-      const parsed: unknown = JSON.parse(line);
-      if (!isCommandAuditEntry(parsed) || parsed.guildId !== guildId) {
-        throw new Error("Command log file contains an invalid entry.");
-      }
-      return parsed;
-    });
+  const rows = getDatabase()
+    .prepare(
+      `
+    SELECT timestamp, command_name, user_name, user_id, guild_name, guild_id, channel_id, outcome, source
+    FROM command_audit
+    WHERE guild_id = ?
+    ORDER BY timestamp DESC, audit_id DESC
+    LIMIT ?
+  `,
+    )
+    .all(guildId, limit) as {
+    timestamp: string;
+    command_name: string;
+    user_name: string;
+    user_id: string;
+    guild_name: string;
+    guild_id: string;
+    channel_id: string | null;
+    outcome: "completed" | "error";
+    source: "command" | "dashboard";
+  }[];
+  return rows.map((row): StoredAuditEntry => ({
+    timestamp: row.timestamp,
+    commandName: row.command_name,
+    userName: row.user_name,
+    userId: row.user_id,
+    guildName: row.guild_name,
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    outcome: row.outcome,
+    source: row.source,
+  }));
 }

@@ -1,13 +1,16 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#090b12">
-    <meta name="description" content="Manage server protection, activity, moderation, and community tools from Orbit.">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090b12" />
+    <meta
+      name="description"
+      content="Manage server protection, activity, moderation, and community tools from Orbit."
+    />
     <title>Orbit — Discord Bot Dashboard</title>
-    <link rel="preconnect" href="https://cdn.discordapp.com">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="preconnect" href="https://cdn.discordapp.com" />
+    <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -21,9 +24,11 @@
       <div class="topbar-right">
         <span class="connection"><span class="connection-dot"></span> BOT CONTROL CENTER</span>
         <div id="accountArea" class="account-area" hidden>
-          <img id="userAvatar" class="avatar" alt="">
+          <img id="userAvatar" class="avatar" alt="" />
           <span id="userName" class="user-name"></span>
-          <button id="logoutButton" class="icon-button" type="button" aria-label="Sign out">↗</button>
+          <button id="logoutButton" class="icon-button" type="button" aria-label="Sign out">
+            ↗
+          </button>
         </div>
       </div>
     </header>
@@ -32,17 +37,19 @@
       <section id="signInView" class="signin-view" hidden>
         <div class="signin-copy">
           <p class="eyebrow"><span class="eyebrow-line"></span> YOUR SERVER, IN ORBIT</p>
-          <h1>Everything in<br>one <span>clear view.</span></h1>
+          <h1>Everything in<br />one <span>clear view.</span></h1>
           <p class="signin-description">
-            A calmer control room for your Discord servers. Tune welcome settings,
-            explore commands, and review activity without digging through menus.
+            A calmer control room for your Discord servers. Tune welcome settings, explore commands,
+            and review activity without digging through menus.
           </p>
           <a class="primary-button" href="/auth/login">
             <span class="discord-mark">◈</span>
             Continue with Discord
             <span class="button-arrow">↗</span>
           </a>
-          <p class="signin-note">Only servers you manage, where this bot is installed, will appear.</p>
+          <p class="signin-note">
+            Only servers you manage, where this bot is installed, will appear.
+          </p>
         </div>
         <div class="signin-art" aria-hidden="true">
           <div class="orbit orbit-large"></div>
@@ -65,12 +72,27 @@
           </label>
           <div class="sidebar-label nav-label">CONTROL ROOM</div>
           <nav class="side-nav" aria-label="Dashboard sections">
-            <button class="nav-item active" type="button" data-panel="overview"><span>◫</span> Overview</button>
-            <button class="nav-item" type="button" data-panel="setup"><span>✳</span> Quick setup</button>
-            <button class="nav-item" type="button" data-panel="tools"><span>⚙</span> Server tools</button>
-            <button class="nav-item" type="button" data-panel="commands"><span>⌘</span> Command library</button>
-            <button class="nav-item" type="button" data-panel="logs"><span>≋</span> Activity logs</button>
-            <button id="botStatusNav" class="nav-item" type="button" data-panel="status" hidden><span>◉</span> Bot status</button>
+            <button class="nav-item active" type="button" data-panel="overview">
+              <span>◫</span> Overview
+            </button>
+            <button class="nav-item" type="button" data-panel="setup">
+              <span>✳</span> Quick setup
+            </button>
+            <button class="nav-item" type="button" data-panel="tools">
+              <span>⚙</span> Server tools
+            </button>
+            <button class="nav-item" type="button" data-panel="commands">
+              <span>⌘</span> Command library
+            </button>
+            <button class="nav-item" type="button" data-panel="logs">
+              <span>≋</span> Activity logs
+            </button>
+            <button class="nav-item" type="button" data-panel="analytics">
+              <span>↗</span> Analytics
+            </button>
+            <button id="botStatusNav" class="nav-item" type="button" data-panel="status" hidden>
+              <span>◉</span> Bot status
+            </button>
           </nav>
           <div class="sidebar-bottom">
             <div class="sidebar-bot-mark">O</div>
@@ -86,7 +108,9 @@
               <h1 id="pageTitle">Overview</h1>
               <p id="pageSubtitle" class="page-subtitle">Your server, at a glance.</p>
             </div>
-            <div class="server-chip"><span class="live-dot"></span><span id="currentGuildName">Loading server…</span></div>
+            <div class="server-chip">
+              <span class="live-dot"></span><span id="currentGuildName">Loading server…</span>
+            </div>
           </div>
           <div id="panelContent" aria-live="polite">
             <div class="loading-card"><span class="spinner"></span> Loading your server…</div>
@@ -103,6 +127,8 @@
     </main>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <footer class="footer"><span>ORBIT · DISCORD BOT CONTROL CENTER</span><span>BUILT FOR YOUR COMMUNITY</span></footer>
+    <footer class="footer">
+      <span>ORBIT · DISCORD BOT CONTROL CENTER</span><span>BUILT FOR YOUR COMMUNITY</span>
+    </footer>
   </body>
 </html>

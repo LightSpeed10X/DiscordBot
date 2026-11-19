@@ -36,7 +36,9 @@ function optionalDashboardConfig(): DashboardConfig | undefined {
   const sessionSecret = optionalEnv("DASHBOARD_SESSION_SECRET");
   if (!clientSecret && !sessionSecret) return undefined;
   if (!clientSecret || !sessionSecret) {
-    throw new Error("Dashboard setup requires both DISCORD_CLIENT_SECRET and DASHBOARD_SESSION_SECRET");
+    throw new Error(
+      "Dashboard setup requires both DISCORD_CLIENT_SECRET and DASHBOARD_SESSION_SECRET",
+    );
   }
   if (sessionSecret.length < 32) {
     throw new Error("DASHBOARD_SESSION_SECRET must be at least 32 characters long");
@@ -72,7 +74,7 @@ function optionalDashboardConfig(): DashboardConfig | undefined {
     sessionSecret,
     baseUrl: baseUrl.origin,
     port,
-    secureCookies: baseUrl.protocol === "https:"
+    secureCookies: baseUrl.protocol === "https:",
   };
 }
 
@@ -98,5 +100,5 @@ export const config = {
   clientId: requiredSnowflake("DISCORD_CLIENT_ID"),
   guildId: optionalSnowflake("DISCORD_GUILD_ID"),
   logWebhookUrl: optionalDiscordWebhookUrl("BOT_LOG_WEBHOOK_URL"),
-  dashboard: optionalDashboardConfig()
+  dashboard: optionalDashboardConfig(),
 };

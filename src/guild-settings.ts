@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
+import { getDatabase } from "./database/connection.js";
 import { isDiscordWebhookUrl } from "./webhooks.js";
 
 export const botDataDirectory = resolve(process.env.BOT_DATA_DIR?.trim() || "data");
@@ -16,156 +15,123 @@ export interface GuildSettings {
   dashboardWebhookUrl?: string;
 }
 
-const settingsPath = resolve(botDataDirectory, "guild-settings.json");
+interface StoredGuildSettings {
+  guild_id: string;
+  embed_color: number;
+  welcome_channel_id: string | null;
+  welcome_message: string | null;
+  ticket_category_id: string | null;
+  ticket_support_role_id: string | null;
+  auto_moderation_enabled: number;
+  leveling_enabled: number;
+  dashboard_webhook_url: string | null;
+}
+
 const guildSettings = new Map<string, GuildSettings>();
-let saveQueue: Promise<void> = Promise.resolve();
 
 function isSnowflake(value: unknown): value is string {
   return typeof value === "string" && /^\d{17,20}$/.test(value);
 }
 
-function parseSettings(value: unknown): Map<string, GuildSettings> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Guild settings file must contain an object.");
-  }
-
-  const parsed = new Map<string, GuildSettings>();
-  for (const [guildId, settings] of Object.entries(value)) {
-    if (!isSnowflake(guildId) || typeof settings !== "object" || settings === null || Array.isArray(settings)) {
-      throw new Error("Guild settings file contains an invalid entry.");
-    }
-
-    const record = settings as Record<string, unknown>;
-    if (
-      !Number.isInteger(record.embedColor) ||
-      (record.embedColor as number) < 0 ||
-      (record.embedColor as number) > 0xffffff
-    ) {
-      throw new Error(`Guild settings for ${guildId} contain an invalid embed color.`);
-    }
-
-    const setting: GuildSettings = {
-      embedColor: record.embedColor as number,
-      autoModerationEnabled: false,
-      levelingEnabled: false
-    };
-    if (record.welcomeChannelId !== undefined) {
-      if (!isSnowflake(record.welcomeChannelId)) {
-        throw new Error(`Guild settings for ${guildId} contain an invalid welcome channel.`);
-      }
-      setting.welcomeChannelId = record.welcomeChannelId;
-    }
-    if (record.welcomeMessage !== undefined) {
-      if (typeof record.welcomeMessage !== "string" || record.welcomeMessage.length > 500) {
-        throw new Error(`Guild settings for ${guildId} contain an invalid welcome message.`);
-      }
-      setting.welcomeMessage = record.welcomeMessage;
-    }
-    if (record.ticketCategoryId !== undefined) {
-      if (!isSnowflake(record.ticketCategoryId)) {
-        throw new Error(`Guild settings for ${guildId} contain an invalid ticket category.`);
-      }
-      setting.ticketCategoryId = record.ticketCategoryId;
-    }
-    if (record.ticketSupportRoleId !== undefined) {
-      if (!isSnowflake(record.ticketSupportRoleId)) {
-        throw new Error(`Guild settings for ${guildId} contain an invalid ticket support role.`);
-      }
-      setting.ticketSupportRoleId = record.ticketSupportRoleId;
-    }
-    if (record.autoModerationEnabled !== undefined) {
-      if (typeof record.autoModerationEnabled !== "boolean") {
-        throw new Error(`Guild settings for ${guildId} contain an invalid auto-moderation setting.`);
-      }
-      setting.autoModerationEnabled = record.autoModerationEnabled;
-    }
-    if (record.levelingEnabled !== undefined) {
-      if (typeof record.levelingEnabled !== "boolean") {
-        throw new Error(`Guild settings for ${guildId} contain an invalid leveling setting.`);
-      }
-      setting.levelingEnabled = record.levelingEnabled;
-    }
-    if (record.dashboardWebhookUrl !== undefined) {
-      if (!isDiscordWebhookUrl(record.dashboardWebhookUrl)) {
-        throw new Error(`Guild settings for ${guildId} contain an invalid dashboard webhook URL.`);
-      }
-      setting.dashboardWebhookUrl = record.dashboardWebhookUrl;
-    }
-    if ((setting.welcomeChannelId === undefined) !== (setting.welcomeMessage === undefined)) {
-      throw new Error(`Guild settings for ${guildId} must define both welcome fields or neither.`);
-    }
-    parsed.set(guildId, setting);
-  }
-  return parsed;
+function fromDatabase(row: StoredGuildSettings): GuildSettings {
+  return {
+    embedColor: row.embed_color,
+    ...(row.welcome_channel_id ? { welcomeChannelId: row.welcome_channel_id } : {}),
+    ...(row.welcome_message !== null ? { welcomeMessage: row.welcome_message } : {}),
+    ...(row.ticket_category_id ? { ticketCategoryId: row.ticket_category_id } : {}),
+    ...(row.ticket_support_role_id ? { ticketSupportRoleId: row.ticket_support_role_id } : {}),
+    autoModerationEnabled: row.auto_moderation_enabled === 1,
+    levelingEnabled: row.leveling_enabled === 1,
+    ...(row.dashboard_webhook_url ? { dashboardWebhookUrl: row.dashboard_webhook_url } : {}),
+  };
 }
 
 export async function loadGuildSettings(): Promise<void> {
-  try {
-    const content = await readFile(settingsPath, "utf8");
-    const parsed = parseSettings(JSON.parse(content) as unknown);
-    guildSettings.clear();
-    for (const [guildId, settings] of parsed) guildSettings.set(guildId, settings);
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
-    throw new Error("Could not load guild settings. Check the settings file before restarting.", { cause: error });
-  }
+  const rows = getDatabase().prepare("SELECT * FROM guild_settings").all() as StoredGuildSettings[];
+  guildSettings.clear();
+  for (const row of rows) guildSettings.set(row.guild_id, fromDatabase(row));
 }
 
 export function getGuildSettings(guildId: string): GuildSettings {
-  return guildSettings.get(guildId) ?? {
-    embedColor: 0x5865f2,
-    autoModerationEnabled: false,
-    levelingEnabled: false
-  };
+  const settings = guildSettings.get(guildId);
+  return settings
+    ? { ...settings }
+    : {
+        embedColor: 0x5865f2,
+        autoModerationEnabled: false,
+        levelingEnabled: false,
+      };
 }
 
 export async function updateGuildSettings(
   guildId: string,
-  update: Partial<GuildSettings>
+  update: Partial<GuildSettings>,
 ): Promise<GuildSettings> {
-  const operation = saveQueue.then(async () => {
-    if (!isSnowflake(guildId)) throw new Error("Invalid guild ID.");
-    const previous = guildSettings.get(guildId);
-    const next = { ...getGuildSettings(guildId), ...update };
-    if (!Number.isInteger(next.embedColor) || next.embedColor < 0 || next.embedColor > 0xffffff) {
-      throw new Error("Embed color must be a valid 24-bit color.");
-    }
-    if (typeof next.autoModerationEnabled !== "boolean" || typeof next.levelingEnabled !== "boolean") {
-      throw new Error("Feature settings must be enabled or disabled.");
-    }
-    if (next.dashboardWebhookUrl !== undefined && !isDiscordWebhookUrl(next.dashboardWebhookUrl)) {
-      throw new Error("Dashboard webhook URL must be a valid Discord webhook URL.");
-    }
-    if (
-      (next.welcomeChannelId === undefined) !== (next.welcomeMessage === undefined) ||
-      (next.welcomeChannelId !== undefined && !isSnowflake(next.welcomeChannelId)) ||
-      (next.welcomeMessage !== undefined && next.welcomeMessage.length > 500)
-    ) {
-      throw new Error("Welcome settings are invalid.");
-    }
-    if (
-      (next.ticketCategoryId !== undefined && !isSnowflake(next.ticketCategoryId)) ||
-      (next.ticketSupportRoleId !== undefined && !isSnowflake(next.ticketSupportRoleId))
-    ) {
-      throw new Error("Ticket settings are invalid.");
-    }
+  if (!isSnowflake(guildId)) throw new Error("Invalid guild ID.");
+  const next = { ...getGuildSettings(guildId), ...update };
+  if (!Number.isInteger(next.embedColor) || next.embedColor < 0 || next.embedColor > 0xffffff) {
+    throw new Error("Embed color must be a valid 24-bit color.");
+  }
+  if (
+    typeof next.autoModerationEnabled !== "boolean" ||
+    typeof next.levelingEnabled !== "boolean"
+  ) {
+    throw new Error("Feature settings must be enabled or disabled.");
+  }
+  if (
+    next.dashboardWebhookUrl !== undefined &&
+    (typeof next.dashboardWebhookUrl !== "string" || !isDiscordWebhookUrl(next.dashboardWebhookUrl))
+  ) {
+    throw new Error("Dashboard webhook URL must be a valid Discord webhook URL.");
+  }
+  if (
+    (next.welcomeChannelId === undefined) !== (next.welcomeMessage === undefined) ||
+    (next.welcomeChannelId !== undefined && !isSnowflake(next.welcomeChannelId)) ||
+    (next.welcomeMessage !== undefined &&
+      (typeof next.welcomeMessage !== "string" || next.welcomeMessage.length > 500))
+  ) {
+    throw new Error("Welcome settings are invalid.");
+  }
+  if (
+    (next.ticketCategoryId !== undefined && !isSnowflake(next.ticketCategoryId)) ||
+    (next.ticketSupportRoleId !== undefined && !isSnowflake(next.ticketSupportRoleId))
+  ) {
+    throw new Error("Ticket settings are invalid.");
+  }
 
-    guildSettings.set(guildId, next);
-    const snapshot = JSON.stringify(Object.fromEntries(guildSettings), null, 2);
-    const temporaryPath = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      await mkdir(dirname(settingsPath), { recursive: true });
-      await writeFile(temporaryPath, snapshot, { encoding: "utf8", flag: "wx" });
-      await rename(temporaryPath, settingsPath);
-      return next;
-    } catch (error) {
-      if (previous) guildSettings.set(guildId, previous);
-      else guildSettings.delete(guildId);
-      throw error;
-    } finally {
-      await rm(temporaryPath, { force: true });
-    }
-  });
-  saveQueue = operation.then(() => undefined, () => undefined);
-  return operation;
+  const db = getDatabase();
+  db.transaction(() => {
+    db.prepare("INSERT OR IGNORE INTO guilds (guild_id) VALUES (?)").run(guildId);
+    db.prepare(
+      `
+      INSERT INTO guild_settings (
+        guild_id, embed_color, welcome_channel_id, welcome_message, ticket_category_id,
+        ticket_support_role_id, auto_moderation_enabled, leveling_enabled, dashboard_webhook_url,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        embed_color = excluded.embed_color,
+        welcome_channel_id = excluded.welcome_channel_id,
+        welcome_message = excluded.welcome_message,
+        ticket_category_id = excluded.ticket_category_id,
+        ticket_support_role_id = excluded.ticket_support_role_id,
+        auto_moderation_enabled = excluded.auto_moderation_enabled,
+        leveling_enabled = excluded.leveling_enabled,
+        dashboard_webhook_url = excluded.dashboard_webhook_url,
+        updated_at = CURRENT_TIMESTAMP
+    `,
+    ).run(
+      guildId,
+      next.embedColor,
+      next.welcomeChannelId ?? null,
+      next.welcomeMessage ?? null,
+      next.ticketCategoryId ?? null,
+      next.ticketSupportRoleId ?? null,
+      Number(next.autoModerationEnabled),
+      Number(next.levelingEnabled),
+      next.dashboardWebhookUrl ?? null,
+    );
+  })();
+  guildSettings.set(guildId, next);
+  return { ...next };
 }

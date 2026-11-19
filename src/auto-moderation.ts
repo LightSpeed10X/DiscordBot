@@ -2,7 +2,7 @@ import {
   AutoModerationActionType,
   AutoModerationRuleEventType,
   AutoModerationRuleTriggerType,
-  type Guild
+  type Guild,
 } from "discord.js";
 
 const managedRuleNames = ["Orbit Anti-Spam", "Orbit Mention Spam"] as const;
@@ -10,11 +10,11 @@ const managedRuleNameSet = new Set<string>(managedRuleNames);
 
 export async function syncAutoModerationRules(guild: Guild, enabled: boolean): Promise<void> {
   const rules = await guild.autoModerationRules.fetch();
-  const ownedRules = rules.filter(rule =>
-    rule.creatorId === guild.client.user.id && managedRuleNameSet.has(rule.name)
+  const ownedRules = rules.filter(
+    (rule) => rule.creatorId === guild.client.user.id && managedRuleNameSet.has(rule.name),
   );
   if (!enabled) {
-    await Promise.all(ownedRules.map(rule => rule.edit({ enabled: false })));
+    await Promise.all(ownedRules.map((rule) => rule.edit({ enabled: false })));
     return;
   }
 
@@ -23,11 +23,11 @@ export async function syncAutoModerationRules(guild: Guild, enabled: boolean): P
     {
       name: managedRuleNames[1],
       triggerType: AutoModerationRuleTriggerType.MentionSpam,
-      triggerMetadata: { mentionTotalLimit: 5 }
-    }
+      triggerMetadata: { mentionTotalLimit: 5 },
+    },
   ];
   for (const definition of definitions) {
-    const existing = ownedRules.find(rule => rule.name === definition.name);
+    const existing = ownedRules.find((rule) => rule.name === definition.name);
     if (existing) {
       if (!existing.enabled) await existing.edit({ enabled: true });
       continue;
@@ -39,7 +39,7 @@ export async function syncAutoModerationRules(guild: Guild, enabled: boolean): P
       triggerMetadata: "triggerMetadata" in definition ? definition.triggerMetadata : undefined,
       actions: [{ type: AutoModerationActionType.BlockMessage }],
       enabled: true,
-      reason: "Managed by Orbit dashboard"
+      reason: "Managed by Orbit dashboard",
     });
   }
 }

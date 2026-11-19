@@ -25,7 +25,7 @@ export async function sendDiscordWebhookLog(
     color: number;
     timestamp: string;
     fields: Array<{ name: string; value: string; inline?: boolean }>;
-  }
+  },
 ): Promise<void> {
   if (!isDiscordWebhookUrl(webhookUrl)) throw new Error("Invalid Discord webhook URL.");
   const response = await fetch(webhookUrl, {
@@ -33,9 +33,9 @@ export async function sendDiscordWebhookLog(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       embeds: [embed],
-      allowed_mentions: { parse: [] }
+      allowed_mentions: { parse: [] },
     }),
-    signal: AbortSignal.timeout(8_000)
+    signal: AbortSignal.timeout(8_000),
   });
   if (!response.ok) throw new Error(`Discord webhook request failed (HTTP ${response.status}).`);
 }
