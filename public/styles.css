@@ -205,6 +205,15 @@ h1, h2, h3, p { margin-top: 0; }
 .quick-card strong, .quick-card small { display: block; }
 .quick-card strong { font-size: 11px; font-weight: 600; }
 .quick-card small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.tools-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.tool-card { min-width: 0; }
+.tool-badge { flex: 0 0 auto; padding: 6px 8px; border: 1px solid rgba(168,148,255,.18); border-radius: 20px; background: rgba(168,148,255,.07); color: var(--accent-bright); font: 9px "DM Mono", monospace; letter-spacing: .08em; }
+.tool-form { display: grid; gap: 2px; }
+.tool-footnote { margin: 15px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.6; }
+.tool-form textarea { min-height: 120px; }
+.tool-form .primary-button:disabled { opacity: .45; cursor: not-allowed; }
+.empty-state .ghost-button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.empty-state .ghost-button:hover { border-color: rgba(168,148,255,.4); color: var(--text); }
 .setup-list { display: grid; gap: 11px; }
 .setup-step { display: flex; align-items: flex-start; gap: 10px; color: #c8ccda; font-size: 12px; line-height: 1.5; }
 .checkmark { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; border: 1px solid rgba(102,228,210,.24); border-radius: 50%; background: rgba(102,228,210,.08); color: var(--cyan); font-size: 11px; }
@@ -261,7 +270,7 @@ h1, h2, h3, p { margin-top: 0; }
   .signin-view { min-height: 560px; grid-template-columns: 1fr .8fr; }
   .signin-art { min-height: 360px; }
   .dashboard-view { grid-template-columns: 190px minmax(0, 1fr); }
-  .content-grid, .setup-layout { grid-template-columns: 1fr; }
+  .content-grid, .setup-layout, .tools-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 650px) {
   .topbar { height: 64px; padding: 0 5%; }

@@ -117,9 +117,11 @@ with Manage Server can change welcome settings or the server's embed color.
 
 After OAuth is configured and the bot is running, open
 `http://localhost:3000`. Sign in with Discord to see servers where you have
-Manage Server and the bot is installed. The dashboard includes an overview,
-server setup, a command browser, and recent command activity. Tickets,
-XP/levels, and event scheduling are not part of this first dashboard phase.
+Manage Server and the bot is installed. The dashboard includes an overview, server setup, activity levels, Discord
+auto-moderation, channel slowmode controls, announcements, a command browser,
+and recent command activity. Dashboard announcements require Manage Messages;
+slowmode requires Manage Channels. Both actions also check the bot's channel
+permissions and disable mass-mention parsing.
 
 The bot must be online to handle commands. Re-run `npm run deploy:commands`
 after changing slash command definitions.

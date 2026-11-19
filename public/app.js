@@ -15,6 +15,7 @@ let toastTimer;
 const panelDetails = {
   overview: ["Overview", "Your server, at a glance."],
   setup: ["Quick setup", "Configure welcome messages, protection, and activity levels."],
+  tools: ["Server tools", "Manage channel slowmode and post announcements."],
   commands: ["Command library", "Everything your community can ask the bot to do."],
   logs: ["Activity logs", "Recent slash-command activity for this server."]
 };
@@ -255,6 +256,73 @@ function renderSetup() {
   document.getElementById("settingsForm").addEventListener("submit", saveSettings);
 }
 
+function formatSlowmode(seconds) {
+  if (seconds === 0) return "Off";
+  if (seconds % 3600 === 0) return `${seconds / 3600} hour${seconds === 3600 ? "" : "s"}`;
+  if (seconds % 60 === 0) return `${seconds / 60} minute${seconds === 60 ? "" : "s"}`;
+  return `${seconds} seconds`;
+}
+
+function renderServerTools() {
+  const channels = currentOverview.channels;
+  const channelOptions = channels.length
+    ? channels.map(channel => `<option value="${escapeHtml(channel.id)}">#${escapeHtml(channel.name)}</option>`).join("")
+    : '<option value="">No text channels available</option>';
+  const slowmodeValues = [...new Set([0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600,
+    ...channels.map(channel => channel.slowmodeSeconds)])].sort((left, right) => left - right);
+  const initialSlowmode = channels[0]?.slowmodeSeconds ?? 0;
+  panelContent.innerHTML = `
+    <div class="tools-grid">
+      <section class="panel tool-card">
+        <div class="panel-heading">
+          <div><h2>Channel slowmode</h2><p>Set a message delay for a text channel.</p></div>
+          <span class="tool-badge">MANAGE CHANNELS</span>
+        </div>
+        <form id="slowmodeForm" class="tool-form">
+          <div class="field">
+            <label for="slowmodeChannel">Text channel</label>
+            <select id="slowmodeChannel" name="channelId" required>${channelOptions}</select>
+          </div>
+          <div class="field">
+            <label for="slowmodeSeconds">Delay</label>
+            <select id="slowmodeSeconds" name="seconds" ${channels.length ? "" : "disabled"}>
+              ${slowmodeValues.map(seconds => `<option value="${seconds}" ${seconds === initialSlowmode ? "selected" : ""}>${formatSlowmode(seconds)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="form-actions"><button class="primary-button" type="submit" ${channels.length ? "" : "disabled"}>Apply slowmode</button><span id="slowmodeStatus" class="field-hint" role="status"></span></div>
+        </form>
+        <p class="tool-footnote">Both you and the bot need Manage Channels in this server.</p>
+      </section>
+      <section class="panel tool-card">
+        <div class="panel-heading">
+          <div><h2>Post an announcement</h2><p>Send a message to a server text channel.</p></div>
+          <span class="tool-badge">MANAGE MESSAGES</span>
+        </div>
+        <form id="announcementForm" class="tool-form">
+          <div class="field">
+            <label for="announcementChannel">Text channel</label>
+            <select id="announcementChannel" name="channelId" required>${channelOptions}</select>
+          </div>
+          <div class="field">
+            <label for="announcementMessage">Message</label>
+            <textarea id="announcementMessage" name="message" maxlength="2000" required placeholder="Write an announcement for your community…"></textarea>
+            <span class="field-hint">Up to 2,000 characters. Mass mentions are disabled.</span>
+          </div>
+          <div class="form-actions"><button class="primary-button" type="submit" ${channels.length ? "" : "disabled"}>Post announcement</button><span id="announcementStatus" class="field-hint" role="status"></span></div>
+        </form>
+        <p class="tool-footnote">You need Manage Messages. The bot needs permission to view and send messages in the selected channel.</p>
+      </section>
+    </div>`;
+  const slowmodeChannel = document.getElementById("slowmodeChannel");
+  const slowmodeSelect = document.getElementById("slowmodeSeconds");
+  slowmodeChannel.addEventListener("change", () => {
+    const channel = channels.find(item => item.id === slowmodeChannel.value);
+    if (channel) slowmodeSelect.value = String(channel.slowmodeSeconds);
+  });
+  document.getElementById("slowmodeForm").addEventListener("submit", setSlowmode);
+  document.getElementById("announcementForm").addEventListener("submit", postAnnouncement);
+}
+
 function renderCommands() {
   panelContent.innerHTML = `
     <section class="panel">
@@ -331,6 +399,63 @@ async function saveSettings(event) {
   }
 }
 
+async function setSlowmode(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const status = document.getElementById("slowmodeStatus");
+  button.disabled = true;
+  status.textContent = "Applying…";
+  try {
+    const channelId = document.getElementById("slowmodeChannel").value;
+    const seconds = Number(document.getElementById("slowmodeSeconds").value);
+    await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/channels/slowmode`, {
+      method: "PUT",
+      body: JSON.stringify({ channelId, seconds })
+    });
+    const channel = currentOverview.channels.find(item => item.id === channelId);
+    if (channel) channel.slowmodeSeconds = seconds;
+    status.textContent = "Updated";
+    showToast(`Slowmode ${seconds ? `set to ${formatSlowmode(seconds)}` : "disabled"}.`);
+  } catch (error) {
+    status.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function postAnnouncement(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const status = document.getElementById("announcementStatus");
+  const message = document.getElementById("announcementMessage").value.trim();
+  if (!message) {
+    showToast("Enter an announcement message.", true);
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "Posting…";
+  try {
+    await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/announcements`, {
+      method: "POST",
+      body: JSON.stringify({
+        channelId: document.getElementById("announcementChannel").value,
+        message
+      })
+    });
+    document.getElementById("announcementMessage").value = "";
+    status.textContent = "Posted";
+    showToast("Announcement posted.");
+  } catch (error) {
+    status.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadPanel() {
   setPanelHeading();
   if (!currentGuildId || !currentOverview) {
@@ -340,6 +465,10 @@ async function loadPanel() {
 
   if (currentPanel === "setup") {
     renderSetup();
+    return;
+  }
+  if (currentPanel === "tools") {
+    renderServerTools();
     return;
   }
   if (currentPanel === "commands") {
@@ -358,7 +487,7 @@ async function loadPanel() {
     if (currentPanel === "logs") renderLogs(logs);
     else renderOverview(logs, leaderboard);
   } catch (error) {
-    panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load activity</h2><p>${escapeHtml(error.message)}</p></div>`;
+    panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load activity</h2><p>${escapeHtml(error.message)}</p><button class="ghost-button" type="button" data-retry-panel>Try again</button></div>`;
   }
 }
 
@@ -380,7 +509,7 @@ async function loadGuild(guildId) {
     await loadPanel();
   } catch (error) {
     showToast(error.message, true);
-    panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load this server</h2><p>${escapeHtml(error.message)}</p></div>`;
+    panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load this server</h2><p>${escapeHtml(error.message)}</p><button class="ghost-button" type="button" data-retry-guild>Try again</button></div>`;
   }
 }
 
@@ -416,9 +545,16 @@ document.querySelectorAll(".nav-item").forEach(button => {
 });
 panelContent.addEventListener("click", event => {
   const button = event.target.closest("[data-open-panel]");
-  if (!button) return;
-  currentPanel = button.dataset.openPanel;
-  void loadPanel();
+  if (button) {
+    currentPanel = button.dataset.openPanel;
+    void loadPanel();
+    return;
+  }
+  if (event.target.closest("[data-retry-panel]")) {
+    void loadPanel();
+    return;
+  }
+  if (event.target.closest("[data-retry-guild]")) void loadGuild(currentGuildId);
 });
 document.getElementById("logoutButton").addEventListener("click", async () => {
   try {

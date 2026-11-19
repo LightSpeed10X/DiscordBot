@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Server } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,7 +52,8 @@ declare module "express-session" {
 class HttpError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
+    readonly retryAfterSeconds?: number
   ) {
     super(message);
   }
@@ -119,26 +120,64 @@ function getGuildId(req: Request): string {
 }
 
 function hasManageGuild(guild: OAuthGuild): boolean {
+  return hasGuildPermission(guild, PermissionFlagsBits.ManageGuild);
+}
+
+function hasGuildPermission(guild: OAuthGuild, permission: bigint): boolean {
   try {
-    const administrativePermissions =
-      PermissionFlagsBits.ManageGuild | PermissionFlagsBits.Administrator;
-    return (BigInt(guild.permissions) & administrativePermissions) !== 0n;
+    return (BigInt(guild.permissions) & (permission | PermissionFlagsBits.Administrator)) !== 0n;
   } catch {
     return false;
   }
 }
 
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+async function getRetryAfterMilliseconds(response: globalThis.Response): Promise<number> {
+  const headerSeconds = Number.parseFloat(response.headers.get("retry-after") ?? "");
+  let bodySeconds: number | undefined;
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && typeof body.retry_after === "number" && Number.isFinite(body.retry_after)) {
+      bodySeconds = body.retry_after;
+    }
+  } catch {
+    bodySeconds = undefined;
+  }
+  const seconds = Number.isFinite(headerSeconds) && headerSeconds >= 0
+    ? headerSeconds
+    : bodySeconds ?? 1;
+  return Math.max(100, Math.ceil(seconds * 1000));
+}
+
 async function discordApi<T>(path: string, accessToken: string): Promise<T> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const maxAttempts = 3;
+  const maximumAutomaticWaitMs = 5_000;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const response = await fetch(`https://discord.com/api/v10${path}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
         signal: AbortSignal.timeout(10_000)
       });
       if (!response.ok) {
-        if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+        if (response.status === 429) {
+          const retryAfterMs = await getRetryAfterMilliseconds(response);
+          if (attempt < maxAttempts - 1 && retryAfterMs <= maximumAutomaticWaitMs) {
+            await sleep(retryAfterMs);
+            continue;
+          }
+          const retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+          throw new HttpError(
+            503,
+            `Discord is temporarily rate-limiting dashboard requests. Retry in about ${retryAfterSeconds} second(s).`,
+            retryAfterSeconds
+          );
+        }
+        if (attempt < maxAttempts - 1 && response.status >= 500) {
+          await sleep(500);
           continue;
         }
         throw new HttpError(
@@ -152,35 +191,74 @@ async function discordApi<T>(path: string, accessToken: string): Promise<T> {
     } catch (error) {
       lastError = error;
       if (error instanceof HttpError) throw error;
-      if (attempt === 0) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+      if (attempt < maxAttempts - 1) {
+        await sleep(500);
       }
     }
   }
   throw new HttpError(502, `Discord API request failed: ${lastError instanceof Error ? lastError.name : "network error"}.`);
 }
 
+const oauthGuildCache = new Map<string, {
+  expiresAt: number;
+  value: Promise<OAuthGuild[]>;
+}>();
+const oauthGuildCacheTtlMs = 15_000;
+
 async function fetchOAuthGuilds(accessToken: string): Promise<OAuthGuild[]> {
-  const response: unknown = await discordApi("/users/@me/guilds", accessToken);
-  if (!Array.isArray(response) || !response.every(isOAuthGuild)) {
-    throw new HttpError(502, "Discord returned an invalid server list.");
+  const cacheKey = createHash("sha256").update(accessToken).digest("hex");
+  const cached = oauthGuildCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const value = (async () => {
+    const response: unknown = await discordApi("/users/@me/guilds", accessToken);
+    if (!Array.isArray(response) || !response.every(isOAuthGuild)) {
+      throw new HttpError(502, "Discord returned an invalid server list.");
+    }
+    return response;
+  })();
+  oauthGuildCache.set(cacheKey, { expiresAt: Date.now() + oauthGuildCacheTtlMs, value });
+  if (oauthGuildCache.size > 256) {
+    for (const [key, entry] of oauthGuildCache) {
+      if (entry.expiresAt <= Date.now() || oauthGuildCache.size > 256) oauthGuildCache.delete(key);
+    }
   }
-  return response;
+  try {
+    return await value;
+  } catch (error) {
+    if (oauthGuildCache.get(cacheKey)?.value === value) oauthGuildCache.delete(cacheKey);
+    throw error;
+  }
 }
 
 async function authorizeGuild(
   client: Client<true>,
   accessToken: string,
-  guildId: string
+  guildId: string,
+  requiredPermission?: { permission: bigint; message: string }
 ): Promise<Guild> {
   if (!/^\d{17,20}$/.test(guildId)) throw new HttpError(400, "Invalid server ID.");
   const userGuilds = await fetchOAuthGuilds(accessToken);
-  if (!userGuilds.some(guild => guild.id === guildId && hasManageGuild(guild))) {
+  const userGuild = userGuilds.find(guild => guild.id === guildId);
+  if (!userGuild || !hasManageGuild(userGuild)) {
     throw new HttpError(403, "You need Manage Server to access this server.");
+  }
+  if (requiredPermission && !hasGuildPermission(userGuild, requiredPermission.permission)) {
+    throw new HttpError(403, requiredPermission.message);
   }
   const guild = client.guilds.cache.get(guildId);
   if (!guild) throw new HttpError(404, "The bot is not in this server.");
   return guild;
+}
+
+function verifyDashboardMutation(req: Request, baseUrl: string): void {
+  if (
+    req.get("origin") !== baseUrl ||
+    !req.session.csrfToken ||
+    req.get("x-csrf-token") !== req.session.csrfToken
+  ) {
+    throw new HttpError(403, "Your session could not be verified.");
+  }
 }
 
 function getPublicDirectory(): string {
@@ -352,7 +430,11 @@ export async function startDashboard(
     const guild = await authorizeGuild(client, accessToken, getGuildId(req));
     const channels = guild.channels.cache
       .filter(channel => channel.type === ChannelType.GuildText)
-      .map(channel => ({ id: channel.id, name: channel.name }))
+      .map(channel => ({
+        id: channel.id,
+        name: channel.name,
+        slowmodeSeconds: channel.rateLimitPerUser
+      }))
       .sort((left, right) => left.name.localeCompare(right.name));
     res.json({
       guild: {
@@ -385,15 +467,76 @@ export async function startDashboard(
     })));
   }));
 
+  app.put("/api/guilds/:guildId/channels/slowmode", asyncRoute(async (req, res) => {
+    const { accessToken } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
+      permission: PermissionFlagsBits.ManageChannels,
+      message: "You need Manage Channels to change slowmode."
+    });
+    const body: unknown = req.body;
+    if (
+      !isRecord(body) ||
+      typeof body.channelId !== "string" ||
+      !/^\d{17,20}$/.test(body.channelId) ||
+      typeof body.seconds !== "number" ||
+      !Number.isInteger(body.seconds) ||
+      body.seconds < 0 ||
+      body.seconds > 21600
+    ) {
+      throw new HttpError(400, "Choose a text channel and a slowmode from 0 to 21,600 seconds.");
+    }
+    const channel = await guild.channels.fetch(body.channelId);
+    if (!channel || channel.type !== ChannelType.GuildText) {
+      throw new HttpError(400, "Choose a regular server text channel.");
+    }
+    const botMember = await guild.members.fetchMe();
+    if (!channel.permissionsFor(botMember)?.has(PermissionFlagsBits.ManageChannels)) {
+      throw new HttpError(400, "The bot needs Manage Channels in the selected channel.");
+    }
+    await channel.setRateLimitPerUser(body.seconds, "Changed from the dashboard");
+    res.json({ channelId: channel.id, seconds: body.seconds });
+  }));
+
+  app.post("/api/guilds/:guildId/announcements", asyncRoute(async (req, res) => {
+    const { accessToken } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
+      permission: PermissionFlagsBits.ManageMessages,
+      message: "You need Manage Messages to post a dashboard announcement."
+    });
+    const body: unknown = req.body;
+    if (
+      !isRecord(body) ||
+      typeof body.channelId !== "string" ||
+      !/^\d{17,20}$/.test(body.channelId) ||
+      typeof body.message !== "string" ||
+      body.message.trim().length === 0 ||
+      body.message.length > 2000
+    ) {
+      throw new HttpError(400, "Choose a text channel and enter an announcement of up to 2,000 characters.");
+    }
+    const channel = await guild.channels.fetch(body.channelId);
+    if (!channel || channel.type !== ChannelType.GuildText) {
+      throw new HttpError(400, "Choose a regular server text channel.");
+    }
+    const botMember = await guild.members.fetchMe();
+    if (!channel.permissionsFor(botMember)?.has([
+      PermissionFlagsBits.ViewChannel,
+      PermissionFlagsBits.SendMessages
+    ])) {
+      throw new HttpError(400, "The bot needs View Channel and Send Messages in the selected channel.");
+    }
+    const message = await channel.send({
+      content: body.message.trim(),
+      allowedMentions: { parse: [] }
+    });
+    res.status(201).json({ messageId: message.id });
+  }));
+
   app.put("/api/guilds/:guildId/settings", asyncRoute(async (req, res) => {
     const { accessToken } = getSession(req);
-    if (
-      req.get("origin") !== config.baseUrl ||
-      !req.session.csrfToken ||
-      req.get("x-csrf-token") !== req.session.csrfToken
-    ) {
-      throw new HttpError(403, "Your session could not be verified.");
-    }
+    verifyDashboardMutation(req, config.baseUrl);
 
     const guild = await authorizeGuild(client, accessToken, getGuildId(req));
     const body: unknown = req.body;
@@ -458,6 +601,9 @@ export async function startDashboard(
       console.error(`Dashboard request failed (${error instanceof Error ? error.message : "unknown error"}).`);
     }
     if (res.headersSent) return;
+    if (error instanceof HttpError && error.retryAfterSeconds !== undefined) {
+      res.setHeader("Retry-After", String(error.retryAfterSeconds));
+    }
     res.status(status).json({
       error: error instanceof HttpError ? error.message : "Dashboard request failed."
     });
