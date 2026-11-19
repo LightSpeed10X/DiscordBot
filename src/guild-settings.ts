@@ -9,6 +9,8 @@ export interface GuildSettings {
   embedColor: number;
   welcomeChannelId?: string;
   welcomeMessage?: string;
+  ticketCategoryId?: string;
+  ticketSupportRoleId?: string;
   autoModerationEnabled: boolean;
   levelingEnabled: boolean;
   dashboardWebhookUrl?: string;
@@ -58,6 +60,18 @@ function parseSettings(value: unknown): Map<string, GuildSettings> {
         throw new Error(`Guild settings for ${guildId} contain an invalid welcome message.`);
       }
       setting.welcomeMessage = record.welcomeMessage;
+    }
+    if (record.ticketCategoryId !== undefined) {
+      if (!isSnowflake(record.ticketCategoryId)) {
+        throw new Error(`Guild settings for ${guildId} contain an invalid ticket category.`);
+      }
+      setting.ticketCategoryId = record.ticketCategoryId;
+    }
+    if (record.ticketSupportRoleId !== undefined) {
+      if (!isSnowflake(record.ticketSupportRoleId)) {
+        throw new Error(`Guild settings for ${guildId} contain an invalid ticket support role.`);
+      }
+      setting.ticketSupportRoleId = record.ticketSupportRoleId;
     }
     if (record.autoModerationEnabled !== undefined) {
       if (typeof record.autoModerationEnabled !== "boolean") {
@@ -128,6 +142,12 @@ export async function updateGuildSettings(
       (next.welcomeMessage !== undefined && next.welcomeMessage.length > 500)
     ) {
       throw new Error("Welcome settings are invalid.");
+    }
+    if (
+      (next.ticketCategoryId !== undefined && !isSnowflake(next.ticketCategoryId)) ||
+      (next.ticketSupportRoleId !== undefined && !isSnowflake(next.ticketSupportRoleId))
+    ) {
+      throw new Error("Ticket settings are invalid.");
     }
 
     guildSettings.set(guildId, next);

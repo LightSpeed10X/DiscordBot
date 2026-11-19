@@ -36,6 +36,31 @@ export const commands = [
     .setName("leaderboard")
     .setDescription("Show the server's activity leaderboard"),
   new SlashCommandBuilder()
+    .setName("ticket")
+    .setDescription("Open or close a private support ticket")
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName("open")
+        .setDescription("Create a private support ticket")
+        .addStringOption(option =>
+          option.setName("subject").setDescription("Short ticket subject").setMaxLength(100)
+        )
+        .addStringOption(option =>
+          option.setName("details").setDescription("Describe what you need help with").setMaxLength(1000)
+        )
+    )
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName("close")
+        .setDescription("Close this ticket and hide it from its opener")
+    ),
+  new SlashCommandBuilder()
+    .setName("meme")
+    .setDescription("Get an original, text-based community meme"),
+  new SlashCommandBuilder()
+    .setName("joke")
+    .setDescription("Get a light-hearted original joke"),
+  new SlashCommandBuilder()
     .setName("coinflip")
     .setDescription("Flip a coin"),
   new SlashCommandBuilder()

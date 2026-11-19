@@ -12,13 +12,20 @@ import session from "express-session";
 import {
   ChannelType,
   Client,
+  DiscordAPIError,
   PermissionFlagsBits,
+  Team,
   type Guild
 } from "discord.js";
 import type { DashboardConfig } from "./config.js";
 import { commands } from "./commands.js";
 import { syncAutoModerationRules } from "./auto-moderation.js";
-import { getRecentCommandLogs } from "./audit-log.js";
+import {
+  getRecentCommandLogs,
+  recordCommandLog,
+  subscribeToCommandLogs,
+  type CommandAuditEntry
+} from "./audit-log.js";
 import { getLeaderboard } from "./levels.js";
 import {
   getGuildSettings,
@@ -26,6 +33,12 @@ import {
   type GuildSettings
 } from "./guild-settings.js";
 import { isDiscordWebhookUrl, sendDiscordWebhookLog } from "./webhooks.js";
+import {
+  getBotPresenceSettings,
+  updateBotPresence,
+  type BotActivityType,
+  type BotPresenceStatus
+} from "./presence.js";
 
 interface DashboardUser {
   id: string;
@@ -129,6 +142,19 @@ function logDashboardAction(
   details: string,
   fallbackWebhookUrl?: string
 ): void {
+  void recordCommandLog({
+    timestamp: new Date().toISOString(),
+    commandName: action,
+    userName: actor.username,
+    userId: actor.id,
+    guildName: guild.name,
+    guildId: guild.id,
+    channelId: null,
+    source: "dashboard",
+    outcome: "completed"
+  }).catch(error => {
+    console.error(`Dashboard activity log write failed in guild ${guild.id} (${error instanceof Error ? error.name : "unknown error"}).`);
+  });
   const webhookUrl = getGuildSettings(guild.id).dashboardWebhookUrl ?? fallbackWebhookUrl;
   if (!webhookUrl) return;
   void sendDiscordWebhookLog(webhookUrl, {
@@ -153,6 +179,38 @@ function getGuildId(req: Request): string {
 
 function hasManageGuild(guild: OAuthGuild): boolean {
   return hasGuildPermission(guild, PermissionFlagsBits.ManageGuild);
+}
+
+function isApplicationOwner(client: Client<true>, userId: string): boolean {
+  const owner = client.application.owner;
+  return owner?.id === userId || (owner instanceof Team && owner.members.has(userId));
+}
+
+const dashboardDmGuildSendTimes = new Map<string, number[]>();
+const dashboardDmRecipientSendTimes = new Map<string, number>();
+
+function reserveDashboardDm(guildId: string, userId: string): void {
+  const now = Date.now();
+  const hourAgo = now - 60 * 60 * 1000;
+  for (const [id, timestamps] of dashboardDmGuildSendTimes) {
+    const activeTimestamps = timestamps.filter(timestamp => timestamp > hourAgo);
+    if (activeTimestamps.length) dashboardDmGuildSendTimes.set(id, activeTimestamps);
+    else dashboardDmGuildSendTimes.delete(id);
+  }
+  const recentGuildSends = dashboardDmGuildSendTimes.get(guildId) ?? [];
+  if (recentGuildSends.length >= 5) {
+    throw new HttpError(429, "This server has reached the dashboard DM limit of five messages per hour.");
+  }
+  const recipientKey = `${guildId}:${userId}`;
+  if ((dashboardDmRecipientSendTimes.get(recipientKey) ?? 0) > hourAgo) {
+    throw new HttpError(429, "A dashboard DM was already sent to this member within the last hour.");
+  }
+  recentGuildSends.push(now);
+  dashboardDmGuildSendTimes.set(guildId, recentGuildSends);
+  dashboardDmRecipientSendTimes.set(recipientKey, now);
+  for (const [key, timestamp] of dashboardDmRecipientSendTimes) {
+    if (timestamp <= hourAgo) dashboardDmRecipientSendTimes.delete(key);
+  }
 }
 
 function hasGuildPermission(guild: OAuthGuild, permission: bigint): boolean {
@@ -435,9 +493,46 @@ export async function startDashboard(
     }
     res.json({
       user: req.session.user,
-      csrfToken: req.session.csrfToken
+      csrfToken: req.session.csrfToken,
+      isApplicationOwner: isApplicationOwner(client, req.session.user.id)
     });
   });
+
+  app.get("/api/bot/presence", (req, res) => {
+    const { user } = getSession(req);
+    if (!isApplicationOwner(client, user.id)) {
+      throw new HttpError(403, "Only the bot application owner can change global bot status.");
+    }
+    res.json(getBotPresenceSettings());
+  });
+
+  app.put("/api/bot/presence", asyncRoute(async (req, res) => {
+    const { user } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    if (!isApplicationOwner(client, user.id)) {
+      throw new HttpError(403, "Only the bot application owner can change global bot status.");
+    }
+    const body: unknown = req.body;
+    const validStatuses = ["online", "idle", "dnd", "invisible"];
+    const validActivityTypes = ["playing", "listening", "watching", "competing"];
+    if (
+      !isRecord(body) ||
+      typeof body.status !== "string" ||
+      !validStatuses.includes(body.status) ||
+      typeof body.activityType !== "string" ||
+      !validActivityTypes.includes(body.activityType) ||
+      typeof body.activityText !== "string" ||
+      body.activityText.length > 128
+    ) {
+      throw new HttpError(400, "Choose a valid bot status and activity with text up to 128 characters.");
+    }
+    const presence = await updateBotPresence(client, {
+      status: body.status as BotPresenceStatus,
+      activityType: body.activityType as BotActivityType,
+      activityText: body.activityText.trim()
+    });
+    res.json(presence);
+  }));
 
   app.get("/api/guilds", asyncRoute(async (req, res) => {
     const { accessToken } = getSession(req);
@@ -469,6 +564,14 @@ export async function startDashboard(
         slowmodeSeconds: channel.rateLimitPerUser
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
+    const ticketCategories = guild.channels.cache
+      .filter(channel => channel.type === ChannelType.GuildCategory)
+      .map(channel => ({ id: channel.id, name: channel.name }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const roles = guild.roles.cache
+      .filter(role => role.id !== guild.id && !role.managed)
+      .map(role => ({ id: role.id, name: role.name }))
+      .sort((left, right) => left.name.localeCompare(right.name));
     res.json({
       guild: {
         id: guild.id,
@@ -478,6 +581,8 @@ export async function startDashboard(
       },
       settings: getPublicGuildSettings(getGuildSettings(guild.id)),
       channels,
+      ticketCategories,
+      roles,
       commands: commands.map(command => ({
         name: command.name,
         description: command.description
@@ -489,6 +594,84 @@ export async function startDashboard(
     const { accessToken } = getSession(req);
     const guild = await authorizeGuild(client, accessToken, getGuildId(req));
     res.json(await getRecentCommandLogs(guild.id, 100));
+  }));
+
+  app.get("/api/guilds/:guildId/events", asyncRoute(async (req, res) => {
+    const { accessToken } = getSession(req);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req));
+    res.status(200).set({
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Content-Type": "text/event-stream",
+      "X-Accel-Buffering": "no"
+    });
+    res.flushHeaders();
+    res.write("event: connected\ndata: {}\n\n");
+
+    const sendEntry = (entry: CommandAuditEntry) => {
+      if (!res.writableEnded) res.write(`event: command-log\ndata: ${JSON.stringify(entry)}\n\n`);
+    };
+    const unsubscribe = subscribeToCommandLogs(guild.id, sendEntry);
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) res.write(": keep-alive\n\n");
+    }, 15_000);
+    const expiry = setTimeout(() => res.end(), 5 * 60_000);
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      clearTimeout(expiry);
+      unsubscribe();
+    };
+    res.once("close", cleanup);
+  }));
+
+  app.post("/api/guilds/:guildId/dm", asyncRoute(async (req, res) => {
+    const { user, accessToken } = getSession(req);
+    verifyDashboardMutation(req, config.baseUrl);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req), {
+      permission: PermissionFlagsBits.ManageMessages,
+      message: "You need Manage Messages to send a member a direct message."
+    });
+    const body: unknown = req.body;
+    if (
+      !isRecord(body) ||
+      typeof body.userId !== "string" ||
+      !/^\d{17,20}$/.test(body.userId) ||
+      typeof body.message !== "string" ||
+      body.message.trim().length === 0 ||
+      body.message.length > 1000 ||
+      body.confirm !== true
+    ) {
+      throw new HttpError(400, "Choose a server member, enter a message of up to 1,000 characters, and confirm the send.");
+    }
+
+    const actor = await guild.members.fetch(user.id);
+    if (!actor.permissions.has(PermissionFlagsBits.ManageMessages)) {
+      throw new HttpError(403, "You need Manage Messages to send a member a direct message.");
+    }
+    const target = await guild.members.fetch(body.userId);
+    if (target.user.bot) throw new HttpError(400, "Direct messages can only be sent to a human server member.");
+    if (target.id === actor.id) throw new HttpError(400, "Choose another server member.");
+
+    reserveDashboardDm(guild.id, target.id);
+    try {
+      await target.send({
+        content: `A message from the ${guild.name} moderation team:\n\n${body.message.trim()}`,
+        allowedMentions: { parse: [] }
+      });
+    } catch (error) {
+      if (error instanceof DiscordAPIError && error.code === 50007) {
+        throw new HttpError(400, "Discord could not deliver this DM. The member may have direct messages disabled.");
+      }
+      throw error;
+    }
+    logDashboardAction(
+      guild,
+      user,
+      "Member DM sent",
+      `Sent a direct message to ${target.user.tag} (${target.id}); message content omitted.`,
+      fallbackWebhookUrl
+    );
+    res.status(201).json({ userId: target.id });
   }));
 
   app.get("/api/guilds/:guildId/leaderboard", asyncRoute(async (req, res) => {
@@ -700,7 +883,13 @@ export async function startDashboard(
       typeof body.levelingEnabled !== "boolean" ||
       typeof body.dashboardWebhookUrl !== "string" ||
       body.dashboardWebhookUrl.length > 300 ||
-      typeof body.clearDashboardWebhook !== "boolean"
+      typeof body.clearDashboardWebhook !== "boolean" ||
+      (body.ticketCategoryId !== undefined &&
+        body.ticketCategoryId !== null &&
+        (typeof body.ticketCategoryId !== "string" || !/^\d{17,20}$/.test(body.ticketCategoryId))) ||
+      (body.ticketSupportRoleId !== undefined &&
+        body.ticketSupportRoleId !== null &&
+        (typeof body.ticketSupportRoleId !== "string" || !/^\d{17,20}$/.test(body.ticketSupportRoleId)))
     ) {
       throw new HttpError(400, "Enter valid feature settings and a six-digit hex embed color.");
     }
@@ -746,6 +935,26 @@ export async function startDashboard(
       update.welcomeMessage = body.welcomeMessage.trim();
     } else {
       throw new HttpError(400, "Choose a welcome channel and enter a message of up to 500 characters.");
+    }
+
+    if (body.ticketCategoryId === null) {
+      update.ticketCategoryId = undefined;
+    } else if (typeof body.ticketCategoryId === "string") {
+      const category = await guild.channels.fetch(body.ticketCategoryId);
+      if (!category || category.type !== ChannelType.GuildCategory) {
+        throw new HttpError(400, "Choose a valid ticket category.");
+      }
+      update.ticketCategoryId = category.id;
+    }
+
+    if (body.ticketSupportRoleId === null) {
+      update.ticketSupportRoleId = undefined;
+    } else if (typeof body.ticketSupportRoleId === "string") {
+      const role = await guild.roles.fetch(body.ticketSupportRoleId);
+      if (!role || role.id === guild.id || role.managed) {
+        throw new HttpError(400, "Choose a valid, unmanaged support role.");
+      }
+      update.ticketSupportRoleId = role.id;
     }
 
     if (autoModerationEnabled !== getGuildSettings(guild.id).autoModerationEnabled) {

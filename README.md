@@ -54,17 +54,22 @@ its URL as `BOT_LOG_WEBHOOK_URL` in `.env`. Treat this URL as a secret too.
 | `/avatar` | Show a user's avatar | Embed Links (bot) |
 | `/rank` | Show a member's activity level | None |
 | `/leaderboard` | Show the server's activity leaderboard | None |
+| `/ticket open` | Create one private support ticket per member | Manage Channels, Manage Roles (bot) |
+| `/ticket close` | Close and retain a ticket channel | Manage Channels, Manage Roles (bot); opener or support role |
 | `/coinflip` | Flip a coin | None |
 | `/roll` | Roll a number in a chosen range | None |
 | `/choose` | Choose randomly from up to ten options | None |
 | `/eightball` | Get a magic 8-ball answer | None |
+| `/meme` | Show an original text-based meme | None |
+| `/joke` | Show an original light-hearted joke | None |
 | `/poll` | Create a reaction-based poll with up to five choices | Send Messages, Embed Links, Add Reactions (bot) |
 | `/settings view` | View this server's bot settings | Manage Server (user) |
 | `/settings color` | Customize embed color per server | Manage Server (user) |
 | `/settings welcome` | Configure a welcome channel and message | Manage Server (user); View Channel, Send Messages (bot) |
 | `/settings disable-welcome` | Turn off welcome messages | Manage Server (user) |
-| Dashboard → Quick setup | Configure welcome, spam protection, and activity levels | Manage Server (user); Manage Server (bot) for automod |
-| Dashboard → Server tools | Set slowmode, post announcements, clear recent messages, and timeout a member | Manage Channels, Manage Messages, or Moderate Members (user and bot, by action) |
+| Dashboard → Quick setup | Configure welcome, tickets, spam protection, and activity levels | Manage Server (user); Manage Server (bot) for automod |
+| Dashboard → Server tools | Set slowmode, post announcements, clear recent messages, timeout a member, or send one confirmed DM | Manage Channels, Manage Messages, or Moderate Members (user and bot, by action) |
+| Dashboard → Bot status | Set the global bot status and activity | Bot application owner |
 | `/announce` | Post an announcement in the current channel | Manage Messages (user); Send Messages (bot) |
 | `/clear` | Bulk-delete up to 100 recent messages | Manage Messages (user and bot) |
 | `/slowmode` | Set the current channel's slowmode | Manage Channels (user and bot) |
@@ -85,6 +90,11 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
 - Activity leveling is opt-in per server, awards 15–25 XP at most once per
   member per minute, and stores totals in `data/levels.json`. Rank progression
   uses a quadratic XP threshold; `/rank` and `/leaderboard` expose current totals.
+- Tickets are private text channels. Configure an optional category and support
+  role in Dashboard → Quick setup; the opener and configured support role can
+  access an open ticket. Closing hides it from the opener and retains the
+  channel for support history. Ticket subjects/details are not added to command
+  logs.
 - Optional auto-moderation creates Discord-native spam and mention-spam rules
   owned by the bot. Discord applies those rules; the bot does not inspect message
   text. The bot needs Manage Server permission to create or edit these rules.
@@ -96,10 +106,11 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
   Announcement contents are not copied to the webhook.
 - Enable the **Server Members Intent** in the Developer Portal. It is used only
   for fetching members and checking role hierarchy before moderation actions.
-- All slash-command replies, including settings and moderation results, are
-  visible to everyone in the channel. Polls and announcements, random choices,
-  and welcome messages disable mention parsing to prevent accidental mass
-  mentions.
+- Most slash-command replies, including settings and moderation results, are
+  visible to everyone in the channel; ticket acknowledgements are ephemeral.
+  Polls, announcements, random choices, and welcome messages disable mention
+  parsing to prevent accidental mass mentions. Ticket opening only permits a
+  mention of the ticket opener.
 - When `BOT_LOG_WEBHOOK_URL` is configured, command logs include the command,
   timestamp, user name and ID, server/channel IDs, and whether the handler
   completed or errored. Option values are not logged. Treat the webhook URL as
@@ -109,6 +120,15 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
   is installed. It keeps recent command metadata locally under `BOT_DATA_DIR`.
   Do not expose this development dashboard to the public internet; production
   deployment needs HTTPS and a persistent session store.
+- Activity logs update live over an authorized, guild-scoped Server-Sent Events
+  stream and reconnect automatically. Command arguments, announcement content,
+  DM content, and ticket details are not stored in these logs.
+- Dashboard direct messages are one-at-a-time, require explicit confirmation
+  and Manage Messages, disable mentions, and are limited to five per server per
+  hour and one per recipient per hour. Message content is not logged; Discord
+  may still prevent delivery when the recipient has DMs disabled.
+- Global presence settings are available only to the Discord application owner
+  and are persisted in `bot-presence.json` under `BOT_DATA_DIR`.
 - Discord permission and role checks are applied both to command definitions
   and at runtime for privileged operations.
 - Per-server settings are stored as JSON under `BOT_DATA_DIR` (default: `data/`).
@@ -124,9 +144,11 @@ with Manage Server can change welcome settings or the server's embed color.
 
 After OAuth is configured and the bot is running, open
 `http://localhost:3000`. Sign in with Discord to see servers where you have
-Manage Server and the bot is installed. The dashboard includes an overview, server setup, activity levels, Discord
+Manage Server and the bot is installed. The dashboard includes an overview,
+server setup, ticket category/support-role settings, activity levels, Discord
 auto-moderation, channel slowmode controls, announcements, recent-message
-cleanup, member timeouts, a command browser, and recent command activity.
+cleanup, member timeouts, confirmed one-to-one DMs, a command browser, and live
+command activity. The application owner also gets global bot status controls.
 Moderation actions check the signed-in user's permissions, the bot's channel
 permissions, and (for timeouts) role hierarchy.
 

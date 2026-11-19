@@ -20,12 +20,14 @@ export interface CommandAuditEntry {
   guildId: string;
   channelId: string | null;
   outcome: "completed" | "error";
+  source?: "command" | "dashboard";
 }
 
 const logsDirectory = resolve(botDataDirectory, "logs");
 const maxLogFileBytes = 2 * 1024 * 1024;
 const maxStoredEntries = 2000;
 let saveQueue: Promise<void> = Promise.resolve();
+const commandLogListeners = new Map<string, Set<(entry: CommandAuditEntry) => void>>();
 
 function isSnowflake(value: string): boolean {
   return /^\d{17,20}$/.test(value);
@@ -34,6 +36,29 @@ function isSnowflake(value: string): boolean {
 function getLogPath(guildId: string): string {
   if (!isSnowflake(guildId)) throw new Error("Invalid guild ID for command log.");
   return resolve(logsDirectory, `${guildId}.jsonl`);
+}
+
+export function subscribeToCommandLogs(
+  guildId: string,
+  listener: (entry: CommandAuditEntry) => void
+): () => void {
+  const listeners = commandLogListeners.get(guildId) ?? new Set();
+  listeners.add(listener);
+  commandLogListeners.set(guildId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) commandLogListeners.delete(guildId);
+  };
+}
+
+function notifyCommandLogListeners(entry: CommandAuditEntry): void {
+  for (const listener of commandLogListeners.get(entry.guildId) ?? []) {
+    try {
+      listener(entry);
+    } catch (error) {
+      console.error(`Command log listener failed (${error instanceof Error ? error.name : "unknown error"}).`);
+    }
+  }
 }
 
 function isCommandAuditEntry(value: unknown): value is CommandAuditEntry {
@@ -47,7 +72,8 @@ function isCommandAuditEntry(value: unknown): value is CommandAuditEntry {
     typeof entry.guildName === "string" &&
     typeof entry.guildId === "string" &&
     (entry.channelId === null || typeof entry.channelId === "string") &&
-    (entry.outcome === "completed" || entry.outcome === "error")
+    (entry.outcome === "completed" || entry.outcome === "error") &&
+    (entry.source === undefined || entry.source === "command" || entry.source === "dashboard")
   );
 }
 
@@ -58,19 +84,20 @@ export async function recordCommandLog(entry: CommandAuditEntry): Promise<void> 
     await appendFile(path, `${JSON.stringify(entry)}\n`, "utf8");
 
     const file = await stat(path);
-    if (file.size <= maxLogFileBytes) return;
-
-    const lines = (await readFile(path, "utf8"))
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .slice(-maxStoredEntries);
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temporaryPath, `${lines.join("\n")}\n`, { encoding: "utf8", flag: "wx" });
-      await rename(temporaryPath, path);
-    } finally {
-      await rm(temporaryPath, { force: true });
+    if (file.size > maxLogFileBytes) {
+      const lines = (await readFile(path, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .slice(-maxStoredEntries);
+      const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporaryPath, `${lines.join("\n")}\n`, { encoding: "utf8", flag: "wx" });
+        await rename(temporaryPath, path);
+      } finally {
+        await rm(temporaryPath, { force: true });
+      }
     }
+    notifyCommandLogListeners(entry);
   });
   saveQueue = operation.then(() => undefined, () => undefined);
   return operation;

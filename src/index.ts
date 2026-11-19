@@ -6,6 +6,7 @@ import {
   Events,
   GatewayIntentBits,
   GuildMember,
+  MessageFlags,
   PermissionFlagsBits,
   WebhookClient,
   type ChatInputCommandInteraction,
@@ -19,6 +20,10 @@ import { syncAutoModerationRules } from "./auto-moderation.js";
 import { config } from "./config.js";
 import { startDashboard } from "./dashboard.js";
 import { awardMessageXp, getLeaderboard, getLevel, loadLevels } from "./levels.js";
+import {
+  applyBotPresence,
+  loadBotPresenceSettings
+} from "./presence.js";
 import {
   getGuildSettings,
   loadGuildSettings,
@@ -45,6 +50,18 @@ const eightBallAnswers = [
   "My reply is no.",
   "Very doubtful."
 ];
+const memes = [
+  ["Me: I will make one small bot change.", "Also me: adds a ticket desk, live logs, and a dashboard."],
+  ["The server is quiet for five minutes.", "The activity leaderboard: suspicious."],
+  ["I asked the bot for a quick answer.", "It opened a private ticket to discuss the question."],
+  ["When the config finally validates.", "The deploy button starts looking less scary."]
+];
+const jokes = [
+  "Why did the Discord bot bring a map? It kept getting lost in the server channels.",
+  "Why was the moderator calm during the outage? They had excellent server composure.",
+  "What is a bot's favorite kind of music? Anything with a good command line.",
+  "Why did the message go to school? It wanted to improve its punctuation."
+];
 const errorReply = "That command could not be completed. Check the bot's permissions and try again.";
 
 function logCommand(
@@ -60,6 +77,7 @@ function logCommand(
       guildName: interaction.guild.name,
       guildId: interaction.guildId,
       channelId: interaction.channelId,
+      source: "command",
       outcome
     }).catch(error => {
       console.error(`Command audit log write failed (${error instanceof Error ? error.name : "unknown error"}).`);
@@ -112,6 +130,165 @@ async function replyPublicly(
   });
 }
 
+async function replyPrivately(
+  interaction: ChatInputCommandInteraction,
+  content: string
+): Promise<void> {
+  await interaction.reply({
+    content,
+    flags: MessageFlags.Ephemeral,
+    allowedMentions: { parse: [] }
+  });
+}
+
+function isTicketTextChannel(channel: unknown): channel is TextChannel {
+  return Boolean(
+    channel &&
+    typeof channel === "object" &&
+    "type" in channel &&
+    (channel.type === ChannelType.GuildText)
+  );
+}
+
+async function executeTicketCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const guild = interaction.guild;
+  if (!guild) {
+    await replyPrivately(interaction, "Tickets are only available in a server.");
+    return;
+  }
+
+  const settings = getGuildSettings(guild.id);
+  const botMember = await guild.members.fetchMe();
+  const requiredBotPermissions = [PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageRoles];
+
+  if (interaction.options.getSubcommand() === "open") {
+    if (!botMember.permissions.has(requiredBotPermissions)) {
+      await replyPrivately(interaction, "The bot needs Manage Channels and Manage Roles to create private tickets.");
+      return;
+    }
+
+    if (settings.ticketCategoryId) {
+      const category = await guild.channels.fetch(settings.ticketCategoryId);
+      if (!category || category.type !== ChannelType.GuildCategory) {
+        await replyPrivately(interaction, "The configured ticket category is no longer available. Ask a server manager to update it.");
+        return;
+      }
+    }
+    if (settings.ticketSupportRoleId && !guild.roles.cache.has(settings.ticketSupportRoleId)) {
+      const role = await guild.roles.fetch(settings.ticketSupportRoleId);
+      if (!role) {
+        await replyPrivately(interaction, "The configured ticket support role is no longer available. Ask a server manager to update it.");
+        return;
+      }
+    }
+
+    const ticketTopic = `orbit-ticket:${interaction.user.id}:open`;
+    const existing = guild.channels.cache.find(channel =>
+      channel.type === ChannelType.GuildText && channel.topic === ticketTopic
+    );
+    if (existing) {
+      await replyPrivately(interaction, `You already have an open ticket: <#${existing.id}>`);
+      return;
+    }
+
+    const usernameSlug = interaction.user.username
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 24) || "member";
+    const permissionOverwrites = [
+      { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+      {
+        id: interaction.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+      },
+      {
+        id: botMember.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.ManageChannels
+        ]
+      },
+      ...(settings.ticketSupportRoleId
+        ? [{
+          id: settings.ticketSupportRoleId,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory
+          ]
+        }]
+        : [])
+    ];
+    const channel = await guild.channels.create({
+      name: `ticket-${usernameSlug}-${interaction.user.id.slice(-4)}`,
+      type: ChannelType.GuildText,
+      ...(settings.ticketCategoryId ? { parent: settings.ticketCategoryId } : {}),
+      topic: ticketTopic,
+      permissionOverwrites,
+      reason: `Private support ticket opened by ${interaction.user.id}`
+    });
+
+    const subject = interaction.options.getString("subject")?.trim();
+    const details = interaction.options.getString("details")?.trim();
+    const openingMessage = [
+      `<@${interaction.user.id}> opened a support ticket.`,
+      subject ? `**Subject:** ${subject}` : "",
+      details || "Please describe what you need help with."
+    ].filter(Boolean).join("\n");
+    await channel.send({
+      content: openingMessage,
+      allowedMentions: { parse: [], users: [interaction.user.id] }
+    });
+    await replyPrivately(interaction, `Your private ticket is ready: <#${channel.id}>`);
+    return;
+  }
+
+  const channel = interaction.channel;
+  if (!isTicketTextChannel(channel)) {
+    await replyPrivately(interaction, "Use `/ticket close` inside an open ticket channel.");
+    return;
+  }
+  const ticketMatch = /^orbit-ticket:(\d{17,20}):open$/.exec(channel.topic ?? "");
+  if (!ticketMatch) {
+    await replyPrivately(interaction, "This channel is not an open Orbit ticket.");
+    return;
+  }
+
+  const openerId = ticketMatch[1];
+  const actor = await guild.members.fetch(interaction.user.id);
+  const canClose = actor.id === openerId ||
+    actor.permissions.has(PermissionFlagsBits.ManageChannels) ||
+    Boolean(settings.ticketSupportRoleId && actor.roles.cache.has(settings.ticketSupportRoleId));
+  if (!canClose) {
+    await replyPrivately(interaction, "Only the ticket opener or the configured support team can close this ticket.");
+    return;
+  }
+  if (!channel.permissionsFor(botMember)?.has(requiredBotPermissions)) {
+    await replyPrivately(interaction, "The bot needs Manage Channels and Manage Roles to close this ticket.");
+    return;
+  }
+
+  await channel.permissionOverwrites.edit(openerId, {
+    ViewChannel: false,
+    SendMessages: false
+  });
+  await channel.setName(`closed-${channel.name}`.slice(0, 100));
+  await channel.setTopic(`orbit-ticket:${openerId}:closed`);
+  await channel.send({
+    content: `Ticket closed by ${interaction.user.username}.`,
+    allowedMentions: { parse: [] }
+  });
+  await replyPrivately(interaction, "Ticket closed. The channel has been retained for support history.");
+}
+
 function isAllowed(
   interaction: ChatInputCommandInteraction,
   permission: bigint
@@ -162,7 +339,8 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         content: [
           "**Utilities:** `/ping`, `/server`, `/user`, `/avatar`, `/poll`",
           "**Levels:** `/rank`, `/leaderboard`",
-          "**Fun:** `/coinflip`, `/roll`, `/choose`, `/eightball`",
+          "**Fun:** `/coinflip`, `/roll`, `/choose`, `/eightball`, `/meme`, `/joke`",
+          "**Tickets:** `/ticket open`, `/ticket close`",
           "**Moderation:** `/clear`, `/slowmode`, `/timeout`, `/kick`, `/ban`",
           "**Server customization:** `/settings view`, `/settings color`, `/settings welcome`, `/settings disable-welcome`",
           "**Other:** `/announce`"
@@ -293,6 +471,24 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
       await interaction.reply(`🎱 ${answer}`);
       return;
     }
+    case "meme": {
+      const [setup, punchline] = memes[randomInt(memes.length)];
+      const embed = new EmbedBuilder()
+        .setColor(embedColor(interaction.guildId))
+        .setTitle("A little community humor")
+        .setDescription(`**${setup}**\n\n${punchline}`)
+        .setFooter({ text: "Original text meme" });
+      await interaction.reply({ embeds: [embed] });
+      return;
+    }
+    case "joke": {
+      await interaction.reply(jokes[randomInt(jokes.length)]);
+      return;
+    }
+    case "ticket": {
+      await executeTicketCommand(interaction);
+      return;
+    }
     case "poll": {
       const channel = getGuildTextChannel(interaction);
       if (!channel) {
@@ -338,9 +534,12 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         const welcomeSummary = settings.welcomeChannelId
           ? `Enabled in <#${settings.welcomeChannelId}>\nMessage: ${settings.welcomeMessage}`
           : "Disabled";
+        const ticketSummary = settings.ticketCategoryId
+          ? `Category <#${settings.ticketCategoryId}>${settings.ticketSupportRoleId ? ` · Support <@&${settings.ticketSupportRoleId}>` : ""}`
+          : "Default category";
         await replyPublicly(
           interaction,
-          `**Server bot settings**\nEmbed color: \`#${settings.embedColor.toString(16).padStart(6, "0").toUpperCase()}\`\nWelcome messages: ${welcomeSummary}\nAuto-moderation: ${settings.autoModerationEnabled ? "Enabled" : "Disabled"}\nLevels: ${settings.levelingEnabled ? "Enabled" : "Disabled"}`
+          `**Server bot settings**\nEmbed color: \`#${settings.embedColor.toString(16).padStart(6, "0").toUpperCase()}\`\nWelcome messages: ${welcomeSummary}\nTickets: ${ticketSummary}\nAuto-moderation: ${settings.autoModerationEnabled ? "Enabled" : "Disabled"}\nLevels: ${settings.levelingEnabled ? "Enabled" : "Disabled"}`
         );
         return;
       }
@@ -498,8 +697,14 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
   }
 }
 
-client.once(Events.ClientReady, readyClient => {
+client.once(Events.ClientReady, async readyClient => {
   console.log(`Ready as ${readyClient.user.tag}`);
+  try {
+    await readyClient.application.fetch();
+  } catch (error) {
+    console.error(`Could not load Discord application ownership data (${error instanceof Error ? error.name : "unknown error"}).`);
+  }
+  applyBotPresence(readyClient);
   const levelingGuildCount = readyClient.guilds.cache.filter(
     guild => getGuildSettings(guild.id).levelingEnabled
   ).size;
@@ -587,6 +792,7 @@ client.on(Events.Error, error => {
 try {
   await loadGuildSettings();
   await loadLevels();
+  await loadBotPresenceSettings();
   await client.login(config.token);
 } catch (error) {
   console.error(`Bot startup failed (${error instanceof Error ? error.message : "unknown error"}).`);

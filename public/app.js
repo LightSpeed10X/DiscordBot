@@ -10,14 +10,18 @@ let guilds = [];
 let currentGuildId = "";
 let currentOverview = null;
 let currentPanel = "overview";
+let currentLogs = [];
+let currentLeaderboard = [];
+let activityStream = null;
 let toastTimer;
 
 const panelDetails = {
   overview: ["Overview", "Your server, at a glance."],
-  setup: ["Quick setup", "Configure welcome messages, protection, and activity levels."],
+  setup: ["Quick setup", "Configure welcomes, tickets, protection, and activity levels."],
   tools: ["Server tools", "Tune channels, announce updates, and manage members."],
   commands: ["Command library", "Everything your community can ask the bot to do."],
-  logs: ["Activity logs", "Recent slash-command activity for this server."]
+  logs: ["Activity logs", "Recent command and dashboard activity for this server."],
+  status: ["Bot status", "Set the bot's global presence and activity."]
 };
 
 function escapeHtml(value) {
@@ -73,6 +77,7 @@ function setUser(user) {
   }
   avatar.alt = `${username} avatar`;
   area.hidden = false;
+  document.getElementById("botStatusNav").hidden = !user.isApplicationOwner;
 }
 
 function setGuildOptions() {
@@ -117,13 +122,52 @@ function activityRows(logs) {
   }
   return `<div class="activity-list">${logs.slice(0, 6).map(log => `
     <div class="activity-row">
-      <span class="activity-command">/${escapeHtml(log.commandName)}</span>
+      <span class="activity-command">${log.source === "dashboard" ? "Dashboard · " : "/"}${escapeHtml(log.commandName)}</span>
       <span class="activity-user">${escapeHtml(log.userName)}</span>
       <span class="activity-time">${escapeHtml(formatTime(log.timestamp))}</span>
     </div>`).join("")}</div>`;
 }
 
+function logKey(log) {
+  return `${log.timestamp}:${log.userId}:${log.source || "command"}:${log.commandName}:${log.outcome}`;
+}
+
+function mergeLogs(primary, secondary) {
+  const entries = new Map();
+  for (const log of [...primary, ...secondary]) entries.set(logKey(log), log);
+  return [...entries.values()]
+    .sort((left, right) => new Date(right.timestamp) - new Date(left.timestamp))
+    .slice(0, 100);
+}
+
+function connectActivityStream(guildId) {
+  if (activityStream) activityStream.close();
+  activityStream = null;
+  if (!guildId || !window.EventSource) return;
+
+  const stream = new EventSource(`/api/guilds/${encodeURIComponent(guildId)}/events`);
+  activityStream = stream;
+  stream.addEventListener("command-log", event => {
+    try {
+      const log = JSON.parse(event.data);
+      currentLogs = mergeLogs([log], currentLogs);
+      if (currentPanel === "overview") {
+        const latestActivity = document.getElementById("latestActivityContent");
+        if (latestActivity) latestActivity.innerHTML = activityRows(currentLogs);
+      } else if (currentPanel === "logs") {
+        const logsBody = document.getElementById("logsBody");
+        if (logsBody) logsBody.innerHTML = logTableRows(currentLogs);
+        else renderLogs(currentLogs);
+      }
+    } catch {
+      showToast("A live activity update could not be displayed.", true);
+    }
+  });
+}
+
 function renderOverview(logs, leaderboard) {
+  currentLogs = logs;
+  currentLeaderboard = leaderboard;
   const settings = currentOverview.settings;
   const welcomeConfigured = Boolean(settings.welcomeChannelId && settings.welcomeMessage);
   panelContent.innerHTML = `
@@ -180,10 +224,10 @@ function renderOverview(logs, leaderboard) {
       </section>
       <section class="panel span-all">
         <div class="panel-heading">
-          <div><h2>Latest activity</h2><p>Only command metadata is stored; argument values are not collected.</p></div>
+          <div><h2>Latest activity</h2><p>Only command/action metadata is stored; message content and arguments are omitted.</p></div>
           <button class="text-link" type="button" data-open-panel="logs">View logs ↗</button>
         </div>
-        ${activityRows(logs)}
+        <div id="latestActivityContent">${activityRows(logs)}</div>
       </section>
       <section class="panel span-all">
         <div class="panel-heading">
@@ -204,6 +248,8 @@ function renderOverview(logs, leaderboard) {
 function renderSetup() {
   const settings = currentOverview.settings;
   const channels = currentOverview.channels;
+  const categories = currentOverview.ticketCategories;
+  const roles = currentOverview.roles;
   const selectedChannel = settings.welcomeChannelId || "";
   panelContent.innerHTML = `
     <div class="setup-layout">
@@ -226,6 +272,22 @@ function renderSetup() {
             <label for="welcomeMessage">Welcome message</label>
             <textarea id="welcomeMessage" name="welcomeMessage" maxlength="500" placeholder="Welcome {user} to {server}!">${escapeHtml(settings.welcomeMessage || "")}</textarea>
             <span class="field-hint">Placeholders: {user}, {server}, and {count}. Mentions are disabled in welcome messages.</span>
+          </div>
+          <div class="field">
+            <label for="ticketCategory">Ticket category</label>
+            <select id="ticketCategory" name="ticketCategory">
+              <option value="">Use the server's default channel list</option>
+              ${categories.map(category => `<option value="${escapeHtml(category.id)}" ${category.id === settings.ticketCategoryId ? "selected" : ""}>${escapeHtml(category.name)}</option>`).join("")}
+            </select>
+            <span class="field-hint">New private ticket channels will be created here.</span>
+          </div>
+          <div class="field">
+            <label for="ticketSupportRole">Ticket support role</label>
+            <select id="ticketSupportRole" name="ticketSupportRole">
+              <option value="">No additional support role</option>
+              ${roles.map(role => `<option value="${escapeHtml(role.id)}" ${role.id === settings.ticketSupportRoleId ? "selected" : ""}>@${escapeHtml(role.name)}</option>`).join("")}
+            </select>
+            <span class="field-hint">Members with this role can view and reply in open tickets.</span>
           </div>
           <div class="field feature-toggle">
             <label for="autoModerationEnabled">Discord auto-moderation</label>
@@ -364,6 +426,26 @@ function renderServerTools() {
         </form>
         <p class="tool-footnote">Role hierarchy and Discord permissions are checked before the timeout is applied.</p>
       </section>
+      <section class="panel tool-card">
+        <div class="panel-heading">
+          <div><h2>Send a direct message</h2><p>Send one staff message to a member of this server.</p></div>
+          <span class="tool-badge">MANAGE MESSAGES</span>
+        </div>
+        <form id="memberDmForm" class="tool-form">
+          <div class="field">
+            <label for="dmUserId">Member user ID</label>
+            <input id="dmUserId" name="userId" inputmode="numeric" pattern="[0-9]{17,20}" maxlength="20" placeholder="Discord user ID" required>
+          </div>
+          <div class="field">
+            <label for="dmMessage">Message</label>
+            <textarea id="dmMessage" name="message" maxlength="1000" required placeholder="Write a respectful, one-to-one message…"></textarea>
+            <span class="field-hint">Up to 1,000 characters. Mentions are disabled. The message content is not logged.</span>
+          </div>
+          <label class="toggle-row"><input id="dmConfirm" type="checkbox" required> I confirm this is an appropriate one-to-one message.</label>
+          <div class="form-actions"><button class="danger-button" type="submit">Send direct message</button><span id="dmStatus" class="field-hint" role="status"></span></div>
+        </form>
+        <p class="tool-footnote">Requires Manage Messages. Limited to five DMs per server per hour and one per recipient per hour.</p>
+      </section>
     </div>`;
   const slowmodeChannel = document.getElementById("slowmodeChannel");
   const slowmodeSelect = document.getElementById("slowmodeSeconds");
@@ -375,6 +457,49 @@ function renderServerTools() {
   document.getElementById("announcementForm").addEventListener("submit", postAnnouncement);
   document.getElementById("clearMessagesForm").addEventListener("submit", clearMessages);
   document.getElementById("timeoutForm").addEventListener("submit", timeoutMember);
+  document.getElementById("memberDmForm").addEventListener("submit", sendMemberDm);
+}
+
+async function renderBotStatus() {
+  panelContent.innerHTML = '<div class="loading-card"><span class="spinner"></span> Loading bot status…</div>';
+  try {
+    const presence = await api("/api/bot/presence");
+    panelContent.innerHTML = `
+      <div class="setup-layout">
+        <section class="panel">
+          <div class="panel-heading"><div><h2>Global bot presence</h2><p>This status is shared across every server.</p></div></div>
+          <form id="botPresenceForm">
+            <div class="field">
+              <label for="presenceStatus">Status</label>
+              <select id="presenceStatus">
+                ${[["online", "Online"], ["idle", "Idle"], ["dnd", "Do not disturb"], ["invisible", "Invisible"]]
+                  .map(([value, label]) => `<option value="${value}" ${presence.status === value ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field">
+              <label for="presenceActivityType">Activity type</label>
+              <select id="presenceActivityType">
+                ${[["playing", "Playing"], ["listening", "Listening to"], ["watching", "Watching"], ["competing", "Competing in"]]
+                  .map(([value, label]) => `<option value="${value}" ${presence.activityType === value ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field">
+              <label for="presenceActivityText">Activity text</label>
+              <input id="presenceActivityText" maxlength="128" value="${escapeHtml(presence.activityText)}" placeholder="Leave blank to clear the activity">
+              <span class="field-hint">Up to 128 characters. Only the application owner can change global presence.</span>
+            </div>
+            <div class="form-actions"><button class="primary-button" type="submit">Save bot status</button><span id="presenceStatusMessage" class="field-hint" role="status"></span></div>
+          </form>
+        </section>
+        <aside class="setup-tip"><strong>GLOBAL CONTROL</strong>
+          The selected status and activity apply to the bot everywhere it is installed.
+          Settings are saved locally and restored when the bot restarts.
+        </aside>
+      </div>`;
+    document.getElementById("botPresenceForm").addEventListener("submit", saveBotPresence);
+  } catch (error) {
+    panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load bot status</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
 }
 
 function renderCommands() {
@@ -401,19 +526,24 @@ function renderCommands() {
   draw();
 }
 
+function logTableRows(logs) {
+  return logs.map(log => `<tr>
+    <td>${log.source === "dashboard" ? "Dashboard · " : "/"}${escapeHtml(log.commandName)}</td>
+    <td>${escapeHtml(log.userName)}</td>
+    <td>${escapeHtml(log.channelId ? `#${log.channelId}` : "Unknown")}</td>
+    <td><span class="status-pill ${log.outcome === "error" ? "error" : ""}">${escapeHtml(log.outcome)}</span></td>
+    <td>${escapeHtml(formatTime(log.timestamp))}</td>
+  </tr>`).join("");
+}
+
 function renderLogs(logs) {
+  currentLogs = logs;
   panelContent.innerHTML = `
     <section class="panel">
-      <div class="panel-heading"><div><h2>Command activity</h2><p>Most recent activity for ${escapeHtml(currentOverview.guild.name)}. Arguments are not logged.</p></div></div>
+      <div class="panel-heading"><div><h2>Server activity</h2><p>Recent commands and dashboard actions for ${escapeHtml(currentOverview.guild.name)}. Message content and command arguments are not logged.</p></div></div>
       ${logs.length ? `<div class="table-wrap"><table class="logs-table">
         <thead><tr><th>Command</th><th>Member</th><th>Channel</th><th>Result</th><th>Time</th></tr></thead>
-        <tbody>${logs.map(log => `<tr>
-          <td>/${escapeHtml(log.commandName)}</td>
-          <td>${escapeHtml(log.userName)}</td>
-          <td>${escapeHtml(log.channelId ? `#${log.channelId}` : "Unknown")}</td>
-          <td><span class="status-pill ${log.outcome === "error" ? "error" : ""}">${escapeHtml(log.outcome)}</span></td>
-          <td>${escapeHtml(formatTime(log.timestamp))}</td>
-        </tr>`).join("")}</tbody>
+        <tbody id="logsBody">${logTableRows(logs)}</tbody>
       </table></div>` : '<div class="empty-state"><h2>No activity yet</h2><p>Use a slash command in this server and its metadata will appear here.</p></div>'}
     </section>`;
 }
@@ -440,6 +570,8 @@ async function saveSettings(event) {
         welcomeMessage: channelId ? welcomeMessage : null,
         autoModerationEnabled: document.getElementById("autoModerationEnabled").checked,
         levelingEnabled: document.getElementById("levelingEnabled").checked,
+        ticketCategoryId: document.getElementById("ticketCategory").value || null,
+        ticketSupportRoleId: document.getElementById("ticketSupportRole").value || null,
         dashboardWebhookUrl: document.getElementById("dashboardWebhookUrl").value,
         clearDashboardWebhook: document.getElementById("clearDashboardWebhook").checked
       })
@@ -572,8 +704,69 @@ async function timeoutMember(event) {
   }
 }
 
+async function sendMemberDm(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const status = document.getElementById("dmStatus");
+  const userId = document.getElementById("dmUserId").value.trim();
+  const message = document.getElementById("dmMessage").value.trim();
+  if (!/^\d{17,20}$/.test(userId) || !message || !document.getElementById("dmConfirm").checked) {
+    showToast("Enter a member ID and message, then confirm the direct message.", true);
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "Sending…";
+  try {
+    await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/dm`, {
+      method: "POST",
+      body: JSON.stringify({ userId, message, confirm: true })
+    });
+    document.getElementById("dmUserId").value = "";
+    document.getElementById("dmMessage").value = "";
+    document.getElementById("dmConfirm").checked = false;
+    status.textContent = "Sent";
+    showToast("Direct message sent.");
+  } catch (error) {
+    status.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveBotPresence(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button[type=submit]");
+  const statusMessage = document.getElementById("presenceStatusMessage");
+  button.disabled = true;
+  statusMessage.textContent = "Saving…";
+  try {
+    await api("/api/bot/presence", {
+      method: "PUT",
+      body: JSON.stringify({
+        status: document.getElementById("presenceStatus").value,
+        activityType: document.getElementById("presenceActivityType").value,
+        activityText: document.getElementById("presenceActivityText").value
+      })
+    });
+    statusMessage.textContent = "Saved";
+    showToast("Bot presence updated.");
+  } catch (error) {
+    statusMessage.textContent = "";
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadPanel() {
   setPanelHeading();
+  if (currentPanel === "status") {
+    await renderBotStatus();
+    return;
+  }
   if (!currentGuildId || !currentOverview) {
     panelContent.innerHTML = '<div class="empty-state"><h2>No manageable servers found</h2><p>Join a server, give yourself Manage Server, and add the bot there. Then refresh this page.</p></div>';
     return;
@@ -600,8 +793,10 @@ async function loadPanel() {
         ? api(`/api/guilds/${encodeURIComponent(currentGuildId)}/leaderboard`)
         : Promise.resolve([])
     ]);
-    if (currentPanel === "logs") renderLogs(logs);
-    else renderOverview(logs, leaderboard);
+    currentLogs = mergeLogs(logs, currentLogs);
+    currentLeaderboard = leaderboard;
+    if (currentPanel === "logs") renderLogs(currentLogs);
+    else renderOverview(currentLogs, leaderboard);
   } catch (error) {
     panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load activity</h2><p>${escapeHtml(error.message)}</p><button class="ghost-button" type="button" data-retry-panel>Try again</button></div>`;
   }
@@ -609,7 +804,10 @@ async function loadPanel() {
 
 async function loadGuild(guildId) {
   if (!guildId) {
+    connectActivityStream("");
     currentOverview = null;
+    currentLogs = [];
+    currentLeaderboard = [];
     document.getElementById("currentGuildName").textContent = "No server selected";
     await loadPanel();
     return;
@@ -622,6 +820,9 @@ async function loadGuild(guildId) {
   try {
     currentOverview = await api(`/api/guilds/${encodeURIComponent(guildId)}`);
     document.getElementById("currentGuildName").textContent = currentOverview.guild.name;
+    currentLogs = [];
+    currentLeaderboard = [];
+    connectActivityStream(guildId);
     await loadPanel();
   } catch (error) {
     showToast(error.message, true);
@@ -633,7 +834,7 @@ async function boot() {
   try {
     const session = await api("/api/me");
     csrfToken = session.csrfToken;
-    setUser(session.user);
+    setUser({ ...session.user, isApplicationOwner: session.isApplicationOwner });
     showView(dashboardView);
     guilds = await api("/api/guilds");
     setGuildOptions();
@@ -674,6 +875,7 @@ panelContent.addEventListener("click", event => {
 });
 document.getElementById("logoutButton").addEventListener("click", async () => {
   try {
+    if (activityStream) activityStream.close();
     await api("/auth/logout", { method: "POST" });
     window.location.reload();
   } catch (error) {
