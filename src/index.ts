@@ -45,7 +45,7 @@ import {
   reserveTicket,
   setTicketPriority,
 } from "./services/tickets.js";
-import { log, logFailure } from "./utils/logger.js";
+import { getSafeStartupErrorMessage, log, logFailure } from "./utils/logger.js";
 import { applyBotPresence, loadBotPresenceSettings } from "./presence.js";
 import {
   botDataDirectory,
@@ -1309,15 +1309,21 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
+let startupStage = "database initialization";
 try {
   await initializeDatabase(botDataDirectory);
+  startupStage = "persistent service initialization";
   await loadGuildSettings();
   await loadLevels();
   await loadBotPresenceSettings();
+  startupStage = "Discord login";
   await client.login(config.token);
 } catch (error) {
   client.destroy();
   closeDatabase();
-  logFailure("application.startup_failed", error);
+  logFailure("application.startup_failed", error, {
+    stage: startupStage,
+    errorMessage: getSafeStartupErrorMessage(error),
+  });
   process.exitCode = 1;
 }

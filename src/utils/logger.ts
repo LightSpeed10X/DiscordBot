@@ -20,3 +20,24 @@ export function logFailure(event: string, error: unknown, fields: LogFields = {}
     errorName: error instanceof Error ? error.name : "UnknownError",
   });
 }
+
+export function getSafeStartupErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "Unknown error";
+
+  let message = error.message;
+  for (const name of [
+    "DISCORD_TOKEN",
+    "DISCORD_CLIENT_SECRET",
+    "DASHBOARD_SESSION_SECRET",
+    "BOT_LOG_WEBHOOK_URL",
+  ]) {
+    const secret = process.env[name];
+    if (secret) message = message.replaceAll(secret, "[redacted]");
+  }
+  return message
+    .replace(
+      /https?:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[^\s"'<>]+/gi,
+      "[redacted webhook URL]",
+    )
+    .slice(0, 500);
+}
