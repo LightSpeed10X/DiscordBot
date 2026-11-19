@@ -8,6 +8,8 @@ export interface GuildSettings {
   embedColor: number;
   welcomeChannelId?: string;
   welcomeMessage?: string;
+  autoModerationEnabled: boolean;
+  levelingEnabled: boolean;
 }
 
 const settingsPath = resolve(botDataDirectory, "guild-settings.json");
@@ -38,7 +40,11 @@ function parseSettings(value: unknown): Map<string, GuildSettings> {
       throw new Error(`Guild settings for ${guildId} contain an invalid embed color.`);
     }
 
-    const setting: GuildSettings = { embedColor: record.embedColor as number };
+    const setting: GuildSettings = {
+      embedColor: record.embedColor as number,
+      autoModerationEnabled: false,
+      levelingEnabled: false
+    };
     if (record.welcomeChannelId !== undefined) {
       if (!isSnowflake(record.welcomeChannelId)) {
         throw new Error(`Guild settings for ${guildId} contain an invalid welcome channel.`);
@@ -50,6 +56,18 @@ function parseSettings(value: unknown): Map<string, GuildSettings> {
         throw new Error(`Guild settings for ${guildId} contain an invalid welcome message.`);
       }
       setting.welcomeMessage = record.welcomeMessage;
+    }
+    if (record.autoModerationEnabled !== undefined) {
+      if (typeof record.autoModerationEnabled !== "boolean") {
+        throw new Error(`Guild settings for ${guildId} contain an invalid auto-moderation setting.`);
+      }
+      setting.autoModerationEnabled = record.autoModerationEnabled;
+    }
+    if (record.levelingEnabled !== undefined) {
+      if (typeof record.levelingEnabled !== "boolean") {
+        throw new Error(`Guild settings for ${guildId} contain an invalid leveling setting.`);
+      }
+      setting.levelingEnabled = record.levelingEnabled;
     }
     if ((setting.welcomeChannelId === undefined) !== (setting.welcomeMessage === undefined)) {
       throw new Error(`Guild settings for ${guildId} must define both welcome fields or neither.`);
@@ -72,7 +90,11 @@ export async function loadGuildSettings(): Promise<void> {
 }
 
 export function getGuildSettings(guildId: string): GuildSettings {
-  return guildSettings.get(guildId) ?? { embedColor: 0x5865f2 };
+  return guildSettings.get(guildId) ?? {
+    embedColor: 0x5865f2,
+    autoModerationEnabled: false,
+    levelingEnabled: false
+  };
 }
 
 export async function updateGuildSettings(
@@ -85,6 +107,9 @@ export async function updateGuildSettings(
     const next = { ...getGuildSettings(guildId), ...update };
     if (!Number.isInteger(next.embedColor) || next.embedColor < 0 || next.embedColor > 0xffffff) {
       throw new Error("Embed color must be a valid 24-bit color.");
+    }
+    if (typeof next.autoModerationEnabled !== "boolean" || typeof next.levelingEnabled !== "boolean") {
+      throw new Error("Feature settings must be enabled or disabled.");
     }
     if (
       (next.welcomeChannelId === undefined) !== (next.welcomeMessage === undefined) ||

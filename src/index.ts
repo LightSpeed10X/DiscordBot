@@ -14,8 +14,10 @@ import {
 } from "discord.js";
 import { randomInt } from "node:crypto";
 import { recordCommandLog } from "./audit-log.js";
+import { syncAutoModerationRules } from "./auto-moderation.js";
 import { config } from "./config.js";
 import { startDashboard } from "./dashboard.js";
+import { awardMessageXp, getLeaderboard, getLevel, loadLevels } from "./levels.js";
 import {
   getGuildSettings,
   loadGuildSettings,
@@ -23,7 +25,7 @@ import {
 } from "./guild-settings.js";
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages]
 });
 const logWebhook = config.logWebhookUrl
   ? new WebhookClient({ url: config.logWebhookUrl })
@@ -158,6 +160,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
       await interaction.reply({
         content: [
           "**Utilities:** `/ping`, `/server`, `/user`, `/avatar`, `/poll`",
+          "**Levels:** `/rank`, `/leaderboard`",
           "**Fun:** `/coinflip`, `/roll`, `/choose`, `/eightball`",
           "**Moderation:** `/clear`, `/slowmode`, `/timeout`, `/kick`, `/ban`",
           "**Server customization:** `/settings view`, `/settings color`, `/settings welcome`, `/settings disable-welcome`",
@@ -215,6 +218,48 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
         .setImage(avatar)
         .setURL(avatar);
       await interaction.reply({ embeds: [embed] });
+      return;
+    }
+    case "rank": {
+      if (!interaction.guildId) {
+        await replyPublicly(interaction, "Rank is only available in a server.");
+        return;
+      }
+      const target = interaction.options.getUser("target") ?? interaction.user;
+      const entry = getLevel(interaction.guildId, target.id);
+      const currentLevelXp = entry.xp - entry.level ** 2 * 100;
+      const nextLevelXp = (entry.level + 1) ** 2 * 100 - entry.level ** 2 * 100;
+      const embed = new EmbedBuilder()
+        .setColor(embedColor(interaction.guildId))
+        .setTitle(`${target.username}'s activity rank`)
+        .setThumbnail(target.displayAvatarURL({ size: 128 }))
+        .addFields(
+          { name: "Level", value: String(entry.level), inline: true },
+          { name: "Total XP", value: entry.xp.toLocaleString(), inline: true },
+          { name: "Progress", value: `${currentLevelXp} / ${nextLevelXp} XP` }
+        );
+      await interaction.reply({ embeds: [embed] });
+      return;
+    }
+    case "leaderboard": {
+      if (!interaction.guildId) {
+        await replyPublicly(interaction, "The leaderboard is only available in a server.");
+        return;
+      }
+      const leaderboard = getLeaderboard(interaction.guildId);
+      const description = leaderboard.length
+        ? leaderboard.map((entry, index) =>
+          `**${index + 1}.** <@${entry.userId}> — Level ${entry.level} · ${entry.xp.toLocaleString()} XP`
+        ).join("\n")
+        : "No activity has been recorded yet.";
+      const embed = new EmbedBuilder()
+        .setColor(embedColor(interaction.guildId))
+        .setTitle(`${interaction.guild?.name ?? "Server"} activity leaderboard`)
+        .setDescription(description);
+      await interaction.reply({
+        embeds: [embed],
+        allowedMentions: { parse: [] }
+      });
       return;
     }
     case "coinflip": {
@@ -294,7 +339,7 @@ async function executeCommand(interaction: ChatInputCommandInteraction): Promise
           : "Disabled";
         await replyPublicly(
           interaction,
-          `**Server bot settings**\nEmbed color: \`#${settings.embedColor.toString(16).padStart(6, "0").toUpperCase()}\`\nWelcome messages: ${welcomeSummary}`
+          `**Server bot settings**\nEmbed color: \`#${settings.embedColor.toString(16).padStart(6, "0").toUpperCase()}\`\nWelcome messages: ${welcomeSummary}\nAuto-moderation: ${settings.autoModerationEnabled ? "Enabled" : "Disabled"}\nLevels: ${settings.levelingEnabled ? "Enabled" : "Disabled"}`
         );
         return;
       }
@@ -493,6 +538,19 @@ client.on(Events.GuildMemberAdd, async member => {
   }
 });
 
+client.on(Events.MessageCreate, message => {
+  if (!message.guild || message.author.bot || !getGuildSettings(message.guild.id).levelingEnabled) return;
+  void awardMessageXp(message.guild.id, message.author.id).then(async entry => {
+    if (!entry || !message.channel.isSendable()) return;
+    await message.channel.send({
+      content: `${message.author.username} reached level ${entry.level}!`,
+      allowedMentions: { parse: [] }
+    });
+  }).catch(error => {
+    console.error(`Message XP update failed in guild ${message.guildId} (${error instanceof Error ? error.name : "unknown error"}).`);
+  });
+});
+
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
   try {
@@ -523,6 +581,7 @@ client.on(Events.Error, error => {
 
 try {
   await loadGuildSettings();
+  await loadLevels();
   await client.login(config.token);
 } catch (error) {
   console.error(`Bot startup failed (${error instanceof Error ? error.message : "unknown error"}).`);

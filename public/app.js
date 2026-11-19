@@ -14,7 +14,7 @@ let toastTimer;
 
 const panelDetails = {
   overview: ["Overview", "Your server, at a glance."],
-  setup: ["Quick setup", "A few thoughtful settings make the bot feel at home."],
+  setup: ["Quick setup", "Configure welcome messages, protection, and activity levels."],
   commands: ["Command library", "Everything your community can ask the bot to do."],
   logs: ["Activity logs", "Recent slash-command activity for this server."]
 };
@@ -122,7 +122,7 @@ function activityRows(logs) {
     </div>`).join("")}</div>`;
 }
 
-function renderOverview(logs) {
+function renderOverview(logs, leaderboard) {
   const settings = currentOverview.settings;
   const welcomeConfigured = Boolean(settings.welcomeChannelId && settings.welcomeMessage);
   panelContent.innerHTML = `
@@ -141,6 +141,16 @@ function renderOverview(logs) {
         <div class="stat-top"><span>Welcome messages</span><span class="stat-icon">✳</span></div>
         <div class="stat-value">${welcomeConfigured ? "Active" : "Off"}</div>
         <div class="stat-caption">${welcomeConfigured ? "new members get a greeting" : "finish setup to turn them on"}</div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-top"><span>Auto-moderation</span><span class="stat-icon">◆</span></div>
+        <div class="stat-value">${settings.autoModerationEnabled ? "Active" : "Off"}</div>
+        <div class="stat-caption">Discord spam and mention protection</div>
+      </article>
+      <article class="stat-card">
+        <div class="stat-top"><span>Activity levels</span><span class="stat-icon">↗</span></div>
+        <div class="stat-value">${settings.levelingEnabled ? "Active" : "Off"}</div>
+        <div class="stat-caption">message activity XP rewards</div>
       </article>
     </div>
     <div class="content-grid">
@@ -174,6 +184,19 @@ function renderOverview(logs) {
         </div>
         ${activityRows(logs)}
       </section>
+      <section class="panel span-all">
+        <div class="panel-heading">
+          <div><h2>Activity leaderboard</h2><p>Members ranked by message activity XP.</p></div>
+        </div>
+        ${leaderboard.length
+          ? `<div class="activity-list">${leaderboard.slice(0, 5).map((entry, index) => `
+            <div class="activity-row">
+              <span class="activity-command">#${index + 1} ${escapeHtml(entry.username)}</span>
+              <span class="activity-user">Level ${entry.level}</span>
+              <span class="activity-time">${Number(entry.xp).toLocaleString()} XP</span>
+            </div>`).join("")}</div>`
+          : '<div class="empty-state"><h2>No levels yet</h2><p>Enable activity levels in Quick setup to start the leaderboard.</p></div>'}
+      </section>
     </div>`;
 }
 
@@ -202,6 +225,22 @@ function renderSetup() {
             <label for="welcomeMessage">Welcome message</label>
             <textarea id="welcomeMessage" name="welcomeMessage" maxlength="500" placeholder="Welcome {user} to {server}!">${escapeHtml(settings.welcomeMessage || "")}</textarea>
             <span class="field-hint">Placeholders: {user}, {server}, and {count}. Mentions are disabled in welcome messages.</span>
+          </div>
+          <div class="field feature-toggle">
+            <label for="autoModerationEnabled">Discord auto-moderation</label>
+            <div class="toggle-row">
+              <input id="autoModerationEnabled" name="autoModerationEnabled" type="checkbox" ${settings.autoModerationEnabled ? "checked" : ""}>
+              <span>Block Discord-detected spam and excessive mentions.</span>
+            </div>
+            <span class="field-hint">Creates or manages Orbit-owned rules in Discord. The bot needs Manage Server permission.</span>
+          </div>
+          <div class="field feature-toggle">
+            <label for="levelingEnabled">Activity levels</label>
+            <div class="toggle-row">
+              <input id="levelingEnabled" name="levelingEnabled" type="checkbox" ${settings.levelingEnabled ? "checked" : ""}>
+              <span>Earn XP for messages and announce level-ups.</span>
+            </div>
+            <span class="field-hint">Messages are counted for XP but their content is not read or stored. One XP award per member per minute.</span>
           </div>
           <div class="form-actions"><button class="primary-button" type="submit">Save settings</button><span id="saveStatus" class="field-hint"></span></div>
         </form>
@@ -276,7 +315,9 @@ async function saveSettings(event) {
       body: JSON.stringify({
         embedColor: document.getElementById("embedColor").value,
         welcomeChannelId: channelId,
-        welcomeMessage: channelId ? welcomeMessage : null
+        welcomeMessage: channelId ? welcomeMessage : null,
+        autoModerationEnabled: document.getElementById("autoModerationEnabled").checked,
+        levelingEnabled: document.getElementById("levelingEnabled").checked
       })
     });
     currentOverview.settings = result.settings;
@@ -308,9 +349,14 @@ async function loadPanel() {
 
   panelContent.innerHTML = '<div class="loading-card"><span class="spinner"></span> Loading activity…</div>';
   try {
-    const logs = await api(`/api/guilds/${encodeURIComponent(currentGuildId)}/logs`);
+    const [logs, leaderboard] = await Promise.all([
+      api(`/api/guilds/${encodeURIComponent(currentGuildId)}/logs`),
+      currentPanel === "overview"
+        ? api(`/api/guilds/${encodeURIComponent(currentGuildId)}/leaderboard`)
+        : Promise.resolve([])
+    ]);
     if (currentPanel === "logs") renderLogs(logs);
-    else renderOverview(logs);
+    else renderOverview(logs, leaderboard);
   } catch (error) {
     panelContent.innerHTML = `<div class="empty-state"><h2>Couldn’t load activity</h2><p>${escapeHtml(error.message)}</p></div>`;
   }

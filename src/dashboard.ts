@@ -17,7 +17,9 @@ import {
 } from "discord.js";
 import type { DashboardConfig } from "./config.js";
 import { commands } from "./commands.js";
+import { syncAutoModerationRules } from "./auto-moderation.js";
 import { getRecentCommandLogs } from "./audit-log.js";
+import { getLeaderboard } from "./levels.js";
 import {
   getGuildSettings,
   updateGuildSettings,
@@ -374,6 +376,15 @@ export async function startDashboard(
     res.json(await getRecentCommandLogs(guild.id, 100));
   }));
 
+  app.get("/api/guilds/:guildId/leaderboard", asyncRoute(async (req, res) => {
+    const { accessToken } = getSession(req);
+    const guild = await authorizeGuild(client, accessToken, getGuildId(req));
+    res.json(getLeaderboard(guild.id, 10).map(entry => ({
+      ...entry,
+      username: guild.members.cache.get(entry.userId)?.displayName ?? `User ${entry.userId}`
+    })));
+  }));
+
   app.put("/api/guilds/:guildId/settings", asyncRoute(async (req, res) => {
     const { accessToken } = getSession(req);
     if (
@@ -389,13 +400,19 @@ export async function startDashboard(
     if (
       !isRecord(body) ||
       typeof body.embedColor !== "string" ||
-      !/^#[0-9a-fA-F]{6}$/.test(body.embedColor)
+      !/^#[0-9a-fA-F]{6}$/.test(body.embedColor) ||
+      typeof body.autoModerationEnabled !== "boolean" ||
+      typeof body.levelingEnabled !== "boolean"
     ) {
-      throw new HttpError(400, "Enter a valid six-digit hex embed color.");
+      throw new HttpError(400, "Enter valid feature settings and a six-digit hex embed color.");
     }
 
+    const autoModerationEnabled = body.autoModerationEnabled;
+    const levelingEnabled = body.levelingEnabled;
     const update: Partial<GuildSettings> = {
-      embedColor: Number.parseInt(body.embedColor.slice(1), 16)
+      embedColor: Number.parseInt(body.embedColor.slice(1), 16),
+      autoModerationEnabled,
+      levelingEnabled
     };
     if (body.welcomeChannelId === null && body.welcomeMessage === null) {
       update.welcomeChannelId = undefined;
@@ -424,6 +441,9 @@ export async function startDashboard(
       throw new HttpError(400, "Choose a welcome channel and enter a message of up to 500 characters.");
     }
 
+    if (autoModerationEnabled !== getGuildSettings(guild.id).autoModerationEnabled) {
+      await syncAutoModerationRules(guild, autoModerationEnabled);
+    }
     const settings = await updateGuildSettings(guild.id, update);
     res.json({ settings });
   }));

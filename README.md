@@ -1,10 +1,10 @@
 # Discord Bot
 
 A secure, customizable all-in-one Discord bot starter built with TypeScript and
-discord.js. It includes moderation, server/user utilities, polls, announcements,
-welcome messages, per-server embed colors, and fun commands. Commands are
-registered as slash commands and privileged actions are permission- and
-role-hierarchy-checked.
+discord.js. It includes moderation, Discord-native spam protection, activity
+levels, server/user utilities, polls, announcements, welcome messages,
+per-server embed colors, and fun commands. Commands are registered as slash
+commands and privileged actions are permission- and role-hierarchy-checked.
 
 ## Requirements
 
@@ -52,6 +52,8 @@ its URL as `BOT_LOG_WEBHOOK_URL` in `.env`. Treat this URL as a secret too.
 | `/server` | Show server details | Embed Links (bot) |
 | `/user` | Show a user's profile details | Embed Links (bot) |
 | `/avatar` | Show a user's avatar | Embed Links (bot) |
+| `/rank` | Show a member's activity level | None |
+| `/leaderboard` | Show the server's activity leaderboard | None |
 | `/coinflip` | Flip a coin | None |
 | `/roll` | Roll a number in a chosen range | None |
 | `/choose` | Choose randomly from up to ten options | None |
@@ -61,6 +63,7 @@ its URL as `BOT_LOG_WEBHOOK_URL` in `.env`. Treat this URL as a secret too.
 | `/settings color` | Customize embed color per server | Manage Server (user) |
 | `/settings welcome` | Configure a welcome channel and message | Manage Server (user); View Channel, Send Messages (bot) |
 | `/settings disable-welcome` | Turn off welcome messages | Manage Server (user) |
+| Dashboard → Quick setup | Configure welcome, spam protection, and activity levels | Manage Server (user); Manage Server (bot) for automod |
 | `/announce` | Post an announcement in the current channel | Manage Messages (user); Send Messages (bot) |
 | `/clear` | Bulk-delete up to 100 recent messages | Manage Messages (user and bot) |
 | `/slowmode` | Set the current channel's slowmode | Manage Channels (user and bot) |
@@ -76,7 +79,14 @@ checks remain authoritative. Do not grant Administrator unless truly needed.
 
 - Secrets are loaded from environment variables and are never printed.
 - Slash commands require fewer gateway intents than message-based command bots;
-  this bot does not read arbitrary message content.
+  this bot does not read arbitrary message content. Activity leveling counts
+  message events without accessing or storing message text.
+- Activity leveling is opt-in per server, awards 15–25 XP at most once per
+  member per minute, and stores totals in `data/levels.json`. Rank progression
+  uses a quadratic XP threshold; `/rank` and `/leaderboard` expose current totals.
+- Optional auto-moderation creates Discord-native spam and mention-spam rules
+  owned by the bot. Discord applies those rules; the bot does not inspect message
+  text. The bot needs Manage Server permission to create or edit these rules.
 - Enable the **Server Members Intent** in the Developer Portal. It is used only
   for fetching members and checking role hierarchy before moderation actions.
 - All slash-command replies, including settings and moderation results, are

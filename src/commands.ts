@@ -27,6 +27,15 @@ export const commands = [
       option.setName("target").setDescription("User whose avatar to show")
     ),
   new SlashCommandBuilder()
+    .setName("rank")
+    .setDescription("View a member's activity level")
+    .addUserOption(option =>
+      option.setName("target").setDescription("Member whose rank to view")
+    ),
+  new SlashCommandBuilder()
+    .setName("leaderboard")
+    .setDescription("Show the server's activity leaderboard"),
+  new SlashCommandBuilder()
     .setName("coinflip")
     .setDescription("Flip a coin"),
   new SlashCommandBuilder()
